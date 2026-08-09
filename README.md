@@ -16,7 +16,7 @@ A clean desktop budget tracker built with Python + CustomTkinter.
 ## Option 1 – Download the ready-to-run version (Recommended)
 
 1. Go to the [Releases](../../releases) page
-2. Download `PersonalBudgetTracker.exe`
+2. Download `PersonalBudgetTracker_v0.8-beta.exe`
 3. Double-click it — no Python or installation needed
 
 > Windows may show a SmartScreen warning the first time (normal for new apps).  
