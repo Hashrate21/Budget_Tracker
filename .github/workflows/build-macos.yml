@@ -1,10 +1,10 @@
 name: Build macOS App
 
 on:
-  workflow_dispatch:          # Allows you to run it manually
+  workflow_dispatch:          # Allows manual run
   push:
     tags:
-      - 'v*'                  # Also runs when you create a version tag
+      - 'v*'
 
 jobs:
   build:
@@ -28,9 +28,9 @@ jobs:
         run: |
           pyinstaller --windowed \
                       --name "BudgetTrackerMAC" \
-                      --osx-bundle-identifier com.hashrate21.budgettracker \
+                      --osx-bundle-identifier com.joey.budgettracker \
                       --icon=BudgetAppIcon.icns \
-                      Budget_Tracker.py
+                      budget_tracker.py
 
       - name: Zip the .app
         run: |
@@ -40,5 +40,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BudgetTrackerMAC-macOS
-          path: dist/BudgetTrackerMAC-macOS.zip
+          name: PersonalBudgetTracker-macOS
+          path: dist/PersonalBudgetTracker-macOS.zip
