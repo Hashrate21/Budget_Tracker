@@ -35,10 +35,10 @@ jobs:
       - name: Zip the .app
         run: |
           cd dist
-          zip -r PersonalBudgetTracker-macOS.zip PersonalBudgetTracker.app
+          zip -r PersonalBudgetTracker-macOS.zip BudgetTrackerMAC.app
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PersonalBudgetTracker-macOS
-          path: dist/PersonalBudgetTracker-macOS.zip
+          name: BudgetTrackerMAC-macOS
+          path: dist/BudgetTrackerMAC-macOS.zip
