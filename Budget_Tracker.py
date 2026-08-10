@@ -1,4 +1,4 @@
-__version__ = "0.8-beta"
+__version__ = "0.84-beta"
 
 import customtkinter as ctk
 import sqlite3
@@ -125,7 +125,6 @@ def init_database():
             )
         """)
 
-        # Seed default categories the first time
         cur.execute("SELECT COUNT(*) FROM categories")
         if cur.fetchone()[0] == 0:
             defaults = [
@@ -305,7 +304,7 @@ REVERSE_QUARTER_MAP = {v: k for k, v in QUARTER_MAP.items()}
 class BudgetApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title(f"Personal Budget Tracker — {CURRENT_DB}")
+        self.title(f"Personal Budget Tracker — {CURRENT_DB}  (v{__version__})")
         self.geometry("1280x850")
         self.minsize(1100, 720)
 
@@ -320,7 +319,6 @@ class BudgetApp(ctk.CTk):
 
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-        # File menu
         menubar = Menu(self)
         self.configure(menu=menubar)
         file_menu = Menu(menubar, tearoff=0)
@@ -331,6 +329,7 @@ class BudgetApp(ctk.CTk):
         file_menu.add_command(label="Exit", command=self.on_closing)
 
         init_database()
+        self.load_safe_settings()
         self.create_widgets()
         self.apply_theme("Dark")
         self.load_inputs()
@@ -338,6 +337,34 @@ class BudgetApp(ctk.CTk):
         self.load_incomes()
         self.on_frequency_change("Monthly")
         self.on_income_type_change("Fixed")
+        self.update_dashboard()
+
+    def load_safe_settings(self):
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT value FROM settings WHERE key='safe_period'")
+                row = cur.fetchone()
+                if row and row[0] in ("next_pay", "eom"):
+                    self.safe_period = row[0]
+                cur.execute("SELECT value FROM settings WHERE key='safe_inclusive'")
+                row = cur.fetchone()
+                if row:
+                    self.safe_inclusive = (row[0] == "1")
+        except Exception:
+            pass
+
+    def save_safe_settings(self):
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                            ("safe_period", self.safe_period))
+                cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                            ("safe_inclusive", "1" if self.safe_inclusive else "0"))
+                conn.commit()
+        except Exception:
+            pass
 
     def switch_budget(self):
         path = filedialog.askopenfilename(
@@ -371,17 +398,20 @@ class BudgetApp(ctk.CTk):
         CURRENT_DB = name
         save_last_budget(name)
         init_database()
-        self.title(f"Personal Budget Tracker — {CURRENT_DB}")
+        self.load_safe_settings()
+        self.title(f"Personal Budget Tracker — {CURRENT_DB}  (v{__version__})")
         self.load_inputs()
         self.load_bills()
         self.load_incomes()
         self.bill_category.configure(values=self.get_categories())
+        self.update_dashboard()
         self.status_label.configure(text=f"Loaded {CURRENT_DB}", text_color="#9ece6a")
 
     def on_closing(self):
         try:
             self.save_column_widths(self.tree, "bills_col_widths")
             self.save_column_widths(self.inc_tree, "incomes_col_widths")
+            self.save_safe_settings()
         except:
             pass
         self.destroy()
@@ -417,7 +447,7 @@ class BudgetApp(ctk.CTk):
 
     def create_widgets(self):
         # Top Bar
-        top = ctk.CTkFrame(self, height=52, corner_radius=0, fg_color=("#e8e8e8", "#2b2b2b"))
+        top = ctk.CTkFrame(self, height=52, corner_radius=0, fg_color=("#d1d5d8", "#2b2b2b"))
         top.pack(fill="x")
         top.pack_propagate(False)
 
@@ -432,7 +462,6 @@ class BudgetApp(ctk.CTk):
                           command=self.change_theme, width=110, corner_radius=8,
                           font=ctk.CTkFont(family="Verdana", size=13)).pack(side="left")
 
-        # Bottom bar first so the button is always visible
         bottom_frame = ctk.CTkFrame(self, fg_color="transparent")
         bottom_frame.pack(side="bottom", fill="x", pady=(0, 10))
 
@@ -445,14 +474,13 @@ class BudgetApp(ctk.CTk):
                       fg_color="#1565C0", hover_color="#0D47A1",
                       font=ctk.CTkFont(family="Verdana", size=15, weight="bold")).pack()
 
-        # Main container
         self.main_container = ctk.CTkFrame(self, fg_color="transparent")
         self.main_container.pack(fill="both", expand=True, padx=14, pady=(10, 0))
         self.main_container.grid_columnconfigure(0, weight=0)
         self.main_container.grid_columnconfigure(1, weight=1)
         self.main_container.grid_rowconfigure(0, weight=1)
 
-        # ===== LEFT – Inputs =====
+        # LEFT – Inputs + Dashboard
         self.left_frame = ctk.CTkFrame(self.main_container, width=280, corner_radius=12,
                                        border_width=1, border_color=("#d0d0d0", "#555555"))
         self.left_frame.grid(row=0, column=0, sticky="ns", padx=(0, 12))
@@ -479,9 +507,24 @@ class BudgetApp(ctk.CTk):
 
         ctk.CTkButton(self.left_frame, text="Save Inputs", command=self.save_inputs,
                       width=180, height=38, corner_radius=8,
-                      font=ctk.CTkFont(family="Verdana", size=13, weight="bold")).pack(pady=20)
+                      font=ctk.CTkFont(family="Verdana", size=13, weight="bold")).pack(pady=(12, 8))
 
-        # ===== RIGHT – Tabs =====
+        # ---------- Quick Dashboard ----------
+        dash = ctk.CTkFrame(self.left_frame, corner_radius=8,
+                            border_width=1, border_color=("#d0d0d0", "#555555"))
+        dash.pack(fill="x", padx=10, pady=(4, 12))
+
+        ctk.CTkLabel(dash, text="Quick Overview",
+                     font=ctk.CTkFont(family="Verdana", size=13, weight="bold")).pack(pady=(8, 4))
+
+        self.dash_safe_label = ctk.CTkLabel(dash, text="Safe to Spend: —",
+                                            font=ctk.CTkFont(family="Verdana", size=12, weight="bold"))
+        self.dash_safe_label.pack(anchor="w", padx=10, pady=(0, 4))
+
+        self.dash_bills_frame = ctk.CTkFrame(dash, fg_color="transparent")
+        self.dash_bills_frame.pack(fill="x", padx=8, pady=(0, 8))
+
+        # RIGHT – Tabs
         self.right_frame = ctk.CTkFrame(self.main_container, corner_radius=12,
                                         border_width=1, border_color=("#d0d0d0", "#555555"))
         self.right_frame.grid(row=0, column=1, sticky="nsew")
@@ -584,7 +627,6 @@ class BudgetApp(ctk.CTk):
         self.tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
-        # Action row: centered buttons + Search on the right
         action_frame = ctk.CTkFrame(bills_tab, fg_color="transparent")
         action_frame.pack(fill="x", pady=6, padx=4)
 
@@ -708,15 +750,27 @@ class BudgetApp(ctk.CTk):
         self.inc_tree.pack(side="left", fill="both", expand=True)
         inc_scroll.pack(side="right", fill="y")
 
+        # Incomes action bar (with reorder)
         inc_action_frame = ctk.CTkFrame(incomes_tab, fg_color="transparent")
-        inc_action_frame.pack(pady=6)
-        ctk.CTkButton(inc_action_frame, text="Edit", command=self.start_edit_income, width=90, height=30, corner_radius=8).pack(side="left", padx=3)
-        ctk.CTkButton(inc_action_frame, text="Delete Selected", command=self.delete_income, width=130, height=30, corner_radius=8,
+        inc_action_frame.pack(fill="x", pady=6, padx=4)
+
+        ctk.CTkLabel(inc_action_frame, text="").pack(side="left", expand=True)
+
+        inc_btn_group = ctk.CTkFrame(inc_action_frame, fg_color="transparent")
+        inc_btn_group.pack(side="left")
+
+        ctk.CTkButton(inc_btn_group, text="↑ Up", command=self.move_income_up, width=80, height=30, corner_radius=8).pack(side="left", padx=3)
+        ctk.CTkButton(inc_btn_group, text="↓ Down", command=self.move_income_down, width=80, height=30, corner_radius=8).pack(side="left", padx=3)
+        ctk.CTkButton(inc_btn_group, text="Edit", command=self.start_edit_income, width=90, height=30, corner_radius=8).pack(side="left", padx=3)
+        ctk.CTkButton(inc_btn_group, text="Delete", command=self.delete_income, width=90, height=30, corner_radius=8,
                       fg_color="#C62828", hover_color="#8E0000").pack(side="left", padx=3)
+
+        ctk.CTkLabel(inc_action_frame, text="").pack(side="left", expand=True)
 
     # -------------------- Theme & Helpers --------------------
     def change_theme(self, choice):
         self.apply_theme(choice)
+        self.update_dashboard()
 
     def apply_theme(self, theme):
         style = ttk.Style()
@@ -724,25 +778,62 @@ class BudgetApp(ctk.CTk):
 
         if theme == "Light":
             ctk.set_appearance_mode("Light")
-            style.configure("Treeview", background="#ffffff", foreground="#000000",
-                            fieldbackground="#ffffff", font=("Verdana", 11), rowheight=26)
-            style.configure("Treeview.Heading", background="#e8e8e8", foreground="#000000",
-                            font=("Verdana", 11, "bold"))
 
+            # Deeper Cool Gray (much less bright)
+            bg_color = "#E8EAED"          # main background
+            soft_card = "#F0F2F5"         # large panels (Current Inputs, Bills, Incomes)
+            card_color = "#F7F8FA"        # slightly lighter cards
+            border_color = "#D1D5DB"
+            text_color = "#1F2937"
+            heading_bg = "#D1D5DB"
+
+            self.configure(fg_color=bg_color)
+
+            # Treeview
+            style.configure("Treeview",
+                            background=soft_card,
+                            foreground=text_color,
+                            fieldbackground=soft_card,
+                            font=("Verdana", 11),
+                            rowheight=26)
+            style.configure("Treeview.Heading",
+                            background=heading_bg,
+                            foreground=text_color,
+                            font=("Verdana", 11, "bold"))
+            style.map("Treeview", background=[("selected", "#BFDBFE")])
+
+            # Tabs
             self.tabview._segmented_button.configure(
-                fg_color="#E8EEF4",
-                selected_color="#3B8ED0",
-                unselected_color="#D1D9E6",
-                text_color="#1A1A1A",
-                selected_hover_color="#2B7BBF",
-                unselected_hover_color="#C5D0E0",
+                fg_color="#D1D5DB",
+                selected_color="#3B82F6",
+                unselected_color="#9CA3AF",
+                text_color="#1F2937",
+                selected_hover_color="#2563EB",
+                unselected_hover_color="#6B7280",
                 font=ctk.CTkFont(family="Verdana", size=15, weight="bold")
             )
+
+            try:
+                self.left_frame.configure(fg_color=soft_card, border_color=border_color)
+                self.right_frame.configure(fg_color=soft_card, border_color=border_color)
+                self.main_container.configure(fg_color=bg_color)
+            except Exception:
+                pass
+
         else:
+            # ===== DARK THEME =====
             ctk.set_appearance_mode("Dark")
-            style.configure("Treeview", background="#2b2b2b", foreground="#e0e0e0",
-                            fieldbackground="#2b2b2b", font=("Verdana", 11), rowheight=26)
-            style.configure("Treeview.Heading", background="#3c3c3c", foreground="#e0e0e0",
+            self.configure(fg_color="#1a1a1a")
+
+            style.configure("Treeview",
+                            background="#2b2b2b",
+                            foreground="#e0e0e0",
+                            fieldbackground="#2b2b2b",
+                            font=("Verdana", 11),
+                            rowheight=26)
+            style.configure("Treeview.Heading",
+                            background="#3c3c3c",
+                            foreground="#e0e0e0",
                             font=("Verdana", 11, "bold"))
 
             self.tabview._segmented_button.configure(
@@ -754,6 +845,13 @@ class BudgetApp(ctk.CTk):
                 unselected_hover_color="#404040",
                 font=ctk.CTkFont(family="Verdana", size=15, weight="bold")
             )
+
+            try:
+                self.left_frame.configure(fg_color="#2b2b2b", border_color="#555555")
+                self.right_frame.configure(fg_color="#2b2b2b", border_color="#555555")
+                self.main_container.configure(fg_color="#1a1a1a")
+            except Exception:
+                pass
 
     def on_frequency_change(self, choice):
         self.bill_anchor.configure(state="normal")
@@ -906,6 +1004,7 @@ class BudgetApp(ctk.CTk):
                 ))
                 conn.commit()
             self.status_label.configure(text="Inputs saved!", text_color="#9ece6a")
+            self.update_dashboard()
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
@@ -940,17 +1039,40 @@ class BudgetApp(ctk.CTk):
         self.update_bill_btn.configure(state="disabled")
         self.cancel_edit_btn.configure(state="disabled")
 
+    def _validate_amount(self, amount_str, field_name="Amount"):
+        try:
+            amount = float(amount_str or 0)
+        except ValueError:
+            messagebox.showerror("Invalid Amount", f"{field_name} must be a number.")
+            return None
+        if amount < 0:
+            if not messagebox.askyesno("Negative Amount",
+                                       f"{field_name} is negative (${amount:,.2f}).\n\nContinue anyway?"):
+                return None
+        return amount
+
+    def _get_valid_date(self, date_widget, field_name="Date"):
+        try:
+            return date_widget.get_date()
+        except Exception:
+            messagebox.showerror("Invalid Date", f"Please select a valid {field_name}.")
+            return None
+
     def add_bill(self):
         name = self.bill_name.get().strip()
         if not name:
             messagebox.showwarning("Missing", "Name is required.")
             return
+        amount = self._validate_amount(self.bill_amount.get())
+        if amount is None:
+            return
         try:
-            amount = float(self.bill_amount.get() or 0)
             category = self.bill_category.get().strip() or "Uncategorized"
             self.ensure_category(category)
             freq = self.bill_freq.get()
-            anchor = self.bill_anchor.get_date()
+            anchor = self._get_valid_date(self.bill_anchor, "Next Due Date")
+            if anchor is None:
+                return
             due_day = anchor.day
             month = self.get_quarter_start(self.bill_month) if freq == "Quarterly" else (anchor.month if freq == "Annual" else None)
             anchor_date = anchor.strftime("%Y-%m-%d")
@@ -967,6 +1089,7 @@ class BudgetApp(ctk.CTk):
 
             self.clear_bill_form()
             self.load_bills()
+            self.update_dashboard()
             self.status_label.configure(text=f"Added '{name}'", text_color="#9ece6a")
         except Exception as e:
             messagebox.showerror("Error", str(e))
@@ -1010,13 +1133,20 @@ class BudgetApp(ctk.CTk):
     def update_bill(self):
         if not self.editing_id:
             return
+        name = self.bill_name.get().strip()
+        if not name:
+            messagebox.showwarning("Missing", "Name is required.")
+            return
+        amount = self._validate_amount(self.bill_amount.get())
+        if amount is None:
+            return
         try:
-            name = self.bill_name.get().strip()
-            amount = float(self.bill_amount.get() or 0)
             category = self.bill_category.get().strip() or "Uncategorized"
             self.ensure_category(category)
             freq = self.bill_freq.get()
-            anchor = self.bill_anchor.get_date()
+            anchor = self._get_valid_date(self.bill_anchor, "Next Due Date")
+            if anchor is None:
+                return
             due_day = anchor.day
             month = self.get_quarter_start(self.bill_month) if freq == "Quarterly" else (anchor.month if freq == "Annual" else None)
             anchor_date = anchor.strftime("%Y-%m-%d")
@@ -1031,6 +1161,7 @@ class BudgetApp(ctk.CTk):
 
             self.clear_bill_form()
             self.load_bills()
+            self.update_dashboard()
             self.status_label.configure(text=f"Updated '{name}'", text_color="#9ece6a")
         except Exception as e:
             messagebox.showerror("Error", str(e))
@@ -1078,6 +1209,7 @@ class BudgetApp(ctk.CTk):
                 conn.commit()
             self.load_bills()
             self.clear_bill_form()
+            self.update_dashboard()
 
     def move_bill_up(self):
         self._move_bill(-1)
@@ -1128,15 +1260,19 @@ class BudgetApp(ctk.CTk):
         if not name:
             messagebox.showwarning("Missing", "Name is required.")
             return
+        amount = self._validate_amount(self.inc_amount.get(), "Amount / Rate")
+        if amount is None:
+            return
         try:
-            amount = float(self.inc_amount.get() or 0)
             hours = float(self.inc_hours.get() or 0) if self.inc_type.get() == "Hourly" else None
             is_primary = 1 if self.inc_type.get() == "Primary Paycheck" else 0
             freq = self.inc_freq.get()
             month = self.get_quarter_start(self.inc_month) if freq == "Quarterly" else None
 
             if is_primary or freq in ("Bi-weekly", "Monthly", "Quarterly", "Weekly"):
-                anchor_dt = self.inc_anchor.get_date()
+                anchor_dt = self._get_valid_date(self.inc_anchor, "Next Date")
+                if anchor_dt is None:
+                    return
                 anchor = anchor_dt.strftime("%Y-%m-%d")
                 due_day = anchor_dt.day
             else:
@@ -1144,7 +1280,11 @@ class BudgetApp(ctk.CTk):
                 due_day = None
 
             if is_primary and freq == "Days Interval":
-                interval = int(self.inc_interval.get() or 14)
+                try:
+                    interval = int(self.inc_interval.get() or 14)
+                except ValueError:
+                    messagebox.showerror("Invalid Interval", "Interval must be a whole number of days.")
+                    return
             else:
                 interval = None
 
@@ -1164,6 +1304,7 @@ class BudgetApp(ctk.CTk):
 
             self.clear_income_form()
             self.load_incomes()
+            self.update_dashboard()
             self.status_label.configure(text=f"Added income '{name}'", text_color="#9ece6a")
         except Exception as e:
             messagebox.showerror("Error", str(e))
@@ -1224,19 +1365,23 @@ class BudgetApp(ctk.CTk):
     def update_income(self):
         if not self.editing_income_id:
             return
+        name = self.inc_name.get().strip()
+        if not name:
+            messagebox.showwarning("Missing", "Name is required.")
+            return
+        amount = self._validate_amount(self.inc_amount.get(), "Amount / Rate")
+        if amount is None:
+            return
         try:
-            name = self.inc_name.get().strip()
-            if not name:
-                messagebox.showwarning("Missing", "Name is required.")
-                return
-            amount = float(self.inc_amount.get() or 0)
             hours = float(self.inc_hours.get() or 0) if self.inc_type.get() == "Hourly" else None
             is_primary = 1 if self.inc_type.get() == "Primary Paycheck" else 0
             freq = self.inc_freq.get()
             month = self.get_quarter_start(self.inc_month) if freq == "Quarterly" else None
 
             if is_primary or freq in ("Bi-weekly", "Monthly", "Quarterly", "Weekly"):
-                anchor_dt = self.inc_anchor.get_date()
+                anchor_dt = self._get_valid_date(self.inc_anchor, "Next Date")
+                if anchor_dt is None:
+                    return
                 anchor = anchor_dt.strftime("%Y-%m-%d")
                 due_day = anchor_dt.day
             else:
@@ -1244,7 +1389,11 @@ class BudgetApp(ctk.CTk):
                 due_day = None
 
             if is_primary and freq == "Days Interval":
-                interval = int(self.inc_interval.get() or 14)
+                try:
+                    interval = int(self.inc_interval.get() or 14)
+                except ValueError:
+                    messagebox.showerror("Invalid Interval", "Interval must be a whole number of days.")
+                    return
             else:
                 interval = None
 
@@ -1262,6 +1411,7 @@ class BudgetApp(ctk.CTk):
 
             self.clear_income_form()
             self.load_incomes()
+            self.update_dashboard()
             self.status_label.configure(text=f"Updated income '{name}'", text_color="#9ece6a")
         except Exception as e:
             messagebox.showerror("Error", str(e))
@@ -1295,6 +1445,70 @@ class BudgetApp(ctk.CTk):
                 conn.commit()
             self.load_incomes()
             self.clear_income_form()
+            self.update_dashboard()
+
+    def move_income_up(self):
+        self._move_income(-1)
+
+    def move_income_down(self):
+        self._move_income(1)
+
+    def _move_income(self, direction):
+        sel = self.inc_tree.selection()
+        if not sel:
+            return
+        income_id = self.inc_tree.item(sel[0])["values"][0]
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id, sort_order FROM incomes WHERE is_primary=0 ORDER BY sort_order, id")
+            rows = cur.fetchall()
+            ids = [r[0] for r in rows]
+            orders = [r[1] for r in rows]
+            try:
+                idx = ids.index(income_id)
+                new_idx = idx + direction
+                if 0 <= new_idx < len(ids):
+                    cur.execute("UPDATE incomes SET sort_order=? WHERE id=?", (orders[new_idx], income_id))
+                    cur.execute("UPDATE incomes SET sort_order=? WHERE id=?", (orders[idx], ids[new_idx]))
+                    conn.commit()
+            except ValueError:
+                pass
+            except:
+                pass
+        self.load_incomes()
+
+    # -------------------- Dashboard --------------------
+    def update_dashboard(self):
+        for w in self.dash_bills_frame.winfo_children():
+            w.destroy()
+
+        data = self._generate_projection_data(silent=True)
+        if not data:
+            self.dash_safe_label.configure(text="Safe to Spend: (save inputs first)", text_color="gray")
+            return
+
+        safe = data["safe"]
+        safe_color = "#2E7D32" if self.theme_var.get() == "Light" else "#9ece6a"
+        color = safe_color if safe >= 0 else "#f7768e"
+        self.dash_safe_label.configure(text=f"Safe to Spend: ${safe:,.2f}", text_color=color)
+
+        upcoming = []
+        for t in data["full_tx"]:
+            if t["date"] >= data["as_of"] and t["expense"] > 0 and not t["is_paid"]:
+                upcoming.append(t)
+                if len(upcoming) >= 3:
+                    break
+
+        if not upcoming:
+            ctk.CTkLabel(self.dash_bills_frame, text="No upcoming unpaid bills",
+                         font=ctk.CTkFont(family="Verdana", size=11), text_color="gray").pack(anchor="w")
+        else:
+            ctk.CTkLabel(self.dash_bills_frame, text="Next bills:",
+                         font=ctk.CTkFont(family="Verdana", size=11, weight="bold")).pack(anchor="w")
+            for t in upcoming:
+                txt = f"{t['date']}  {t['desc'][:16]}  ${t['expense']:,.0f}"
+                ctk.CTkLabel(self.dash_bills_frame, text=txt,
+                             font=ctk.CTkFont(family="Verdana", size=11)).pack(anchor="w")
 
     # -------------------- Projection --------------------
     def update_projection(self):
@@ -1309,13 +1523,14 @@ class BudgetApp(ctk.CTk):
         except Exception as e:
             messagebox.showerror("Projection Error", str(e))
 
-    def _generate_projection_data(self):
+    def _generate_projection_data(self, silent=False):
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute("SELECT current_balance, as_of_date, buffer FROM inputs LIMIT 1")
             inp = cur.fetchone()
             if not inp:
-                messagebox.showwarning("Missing", "Save Inputs first.")
+                if not silent:
+                    messagebox.showwarning("Missing", "Save Inputs first.")
                 return None
 
             current_balance = float(inp[0] or 0)
@@ -1339,7 +1554,7 @@ class BudgetApp(ctk.CTk):
 
         month_start = as_of.replace(day=1)
         lookback = min(as_of - timedelta(days=10), month_start - timedelta(days=40))
-        end_date = as_of + relativedelta(months=6)
+        end_date = as_of + relativedelta(months=12)
 
         all_paychecks = []
         pay_amt = 0.0
@@ -1388,23 +1603,25 @@ class BudgetApp(ctk.CTk):
 
         tx = []
 
-        # Primary paychecks – always keep full amount
+        # Primary paychecks – respect paid status
         for pdate in all_paychecks:
             if lookback <= pdate <= end_date:
+                key = f"{pdate}|Paycheck"
+                paid = key in previously_paid
                 tx.append({
                     "date": pdate,
                     "desc": "Paycheck",
                     "category": "Income",
                     "income": pay_amt,
                     "expense": 0.0,
-                    "is_paid": False
+                    "is_paid": paid
                 })
 
         def make_due(year, month, day):
             last = calendar.monthrange(year, month)[1]
             return date(year, month, min(day, last))
 
-        # Other incomes – always keep full amount
+        # Other incomes
         for name, typ, amount, hours, freq, due_day, month, is_prim, anchor_date in income_rows:
             if is_prim:
                 continue
@@ -1413,7 +1630,7 @@ class BudgetApp(ctk.CTk):
             amount = float(amount or 0)
             hours = float(hours or 0)
             final_amount = amount * hours if typ == "Hourly" else amount
-            if final_amount <= 0:
+            if final_amount == 0:
                 continue
 
             if not anchor_date:
@@ -1474,12 +1691,12 @@ class BudgetApp(ctk.CTk):
                     "date": d,
                     "desc": name,
                     "category": "Income",
-                    "income": final_amount,   # always full amount
+                    "income": final_amount,
                     "expense": 0.0,
                     "is_paid": paid
                 })
 
-        # Bills – always keep full amount
+        # Bills
         for name, amount, due_day, category, frequency, month, anchor_date in bill_rows:
             bill_name = str(name).strip()
             amt = float(amount or 0)
@@ -1545,14 +1762,13 @@ class BudgetApp(ctk.CTk):
                     "desc": bill_name,
                     "category": cat,
                     "income": 0.0,
-                    "expense": amt,          # always full amount
+                    "expense": amt,
                     "is_paid": paid
                 })
 
         tx.sort(key=lambda x: x["date"])
 
         full_tx = tx[:]
-        # Table shows from the 1st of the current month onward
         tx = [t for t in full_tx if t["date"] >= month_start]
 
         eom = (as_of + relativedelta(months=1)).replace(day=1)
@@ -1563,38 +1779,37 @@ class BudgetApp(ctk.CTk):
         def unpaid_income(t):
             return t["income"] if not t["is_paid"] else 0.0
 
-        bills_next = sum(unpaid_expense(t) for t in full_tx
-                         if as_of <= t["date"] < next_pay)
-        bills_eom  = sum(unpaid_expense(t) for t in full_tx
-                         if as_of <= t["date"] <= eom)
+        bills_next = sum(unpaid_expense(t) for t in full_tx if as_of <= t["date"] < next_pay)
+        bills_eom  = sum(unpaid_expense(t) for t in full_tx if as_of <= t["date"] <= eom)
 
         other_inc_next = sum(unpaid_income(t) for t in full_tx
                              if as_of <= t["date"] < next_pay
-                             and t["category"] == "Income"
-                             and t["desc"] != "Paycheck")
+                             and t["category"] == "Income" and t["desc"] != "Paycheck")
         other_inc_eom  = sum(unpaid_income(t) for t in full_tx
                              if as_of <= t["date"] <= eom
-                             and t["category"] == "Income"
-                             and t["desc"] != "Paycheck")
+                             and t["category"] == "Income" and t["desc"] != "Paycheck")
 
-        primary_eom = sum(t["income"] for t in full_tx
+        primary_eom = sum(unpaid_income(t) for t in full_tx
                           if as_of <= t["date"] <= eom and t["desc"] == "Paycheck")
 
         if self.safe_period == "eom":
             bills_in_window   = bills_eom
             income_in_window  = primary_eom + (other_inc_eom if self.safe_inclusive else 0.0)
-            period_label      = f"End of Month (through {eom})"
+            period_label      = f"Until 1st of next month (through {eom})"
             primary_in_window = primary_eom
+            bal_after = current_balance - bills_eom + primary_eom
+            bal_label = "Balance after 1st of next month"
         else:
             bills_in_window   = bills_next
             income_in_window  = other_inc_next if self.safe_inclusive else 0.0
             period_label      = f"Next Pay ({next_pay})"
             primary_in_window = 0.0
+            bal_after = current_balance - bills_next + pay_amt
+            bal_label = "Balance after next pay"
 
         safe = current_balance - bills_in_window + income_in_window - buffer
-        bal_after = current_balance - bills_in_window + pay_amt
 
-        # 30-day pie chart – only unpaid expenses
+        # 30-day pie
         thirty = as_of + timedelta(days=30)
         cat_totals = {}
         total_inc = total_exp = 0.0
@@ -1608,37 +1823,33 @@ class BudgetApp(ctk.CTk):
         if total_inc - total_exp > 0:
             cat_totals["Savings"] = total_inc - total_exp
 
-        # This Month totals
-        month_end = eom - timedelta(days=1)
-
-        # Income = all income for the month (paid or unpaid)
-        month_income = sum(t["income"] for t in full_tx
-                           if month_start <= t["date"] <= month_end)
-
-        # Expenses = ALL expenses for the month (paid + unpaid)
-        month_expense = sum(t["expense"] for t in full_tx
-                            if month_start <= t["date"] <= month_end and t["expense"] > 0)
-
-        month_net = month_income - month_expense
-
-        # Still unpaid = only unpaid expenses
-        month_unpaid = sum(unpaid_expense(t) for t in full_tx
-                           if month_start <= t["date"] <= month_end)
+        # 12 months for dropdown
+        month_options = []
+        for i in range(12):
+            m = (as_of.replace(day=1) + relativedelta(months=i))
+            label = m.strftime("%B %Y")
+            month_options.append((label, m.year, m.month))
 
         return {
-            "tx": tx, "start_bal": current_balance, "as_of": as_of, "safe": safe,
-            "next_pay": next_pay, "pay_amt": pay_amt, "bills_before": bills_in_window,
-            "bal_after": bal_after, "buffer": buffer, "cat_totals": cat_totals,
+            "tx": tx,
+            "full_tx": full_tx,
+            "start_bal": current_balance,
+            "as_of": as_of,
+            "safe": safe,
+            "next_pay": next_pay,
+            "pay_amt": pay_amt,
+            "bills_before": bills_in_window,
+            "bal_after": bal_after,
+            "bal_label": bal_label,
+            "buffer": buffer,
+            "cat_totals": cat_totals,
             "has_primary": primary is not None,
             "period_label": period_label,
             "income_in_window": income_in_window,
             "primary_in_window": primary_in_window,
             "safe_period": self.safe_period,
             "safe_inclusive": self.safe_inclusive,
-            "month_income": month_income,
-            "month_expense": month_expense,
-            "month_net": month_net,
-            "month_unpaid": month_unpaid,
+            "month_options": month_options,
         }
 
     def _create_projection_window(self, data):
@@ -1648,6 +1859,15 @@ class BudgetApp(ctk.CTk):
         y = self.winfo_y() + 80
         win.geometry(f"1280x860+{x}+{y}")
         win.protocol("WM_DELETE_WINDOW", self._on_projection_close)
+
+        # Actions menu (Mark past / Clear paid)
+        menubar = Menu(win)
+        win.configure(menu=menubar)
+        actions = Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Actions", menu=actions)
+        actions.add_command(label="Mark all past as paid", command=self._mark_past_paid)
+        actions.add_command(label="Clear all paid flags", command=self._clear_all_paid)
+
         win.after(50, lambda: (win.lift(), win.focus_force()))
         self.projection_win = win
         self._build_projection_content(win, data)
@@ -1671,14 +1891,51 @@ class BudgetApp(ctk.CTk):
 
     def _on_safe_period_change(self, choice):
         self.safe_period = "eom" if choice == "Until End of Month" else "next_pay"
+        self.save_safe_settings()
         self.update_projection()
+        self.update_dashboard()
 
     def _on_safe_mode_change(self, choice):
         self.safe_inclusive = (choice == "Inclusive")
+        self.save_safe_settings()
         self.update_projection()
+        self.update_dashboard()
+
+    def _mark_past_paid(self):
+        data = self._generate_projection_data(silent=True)
+        if not data:
+            return
+        as_of = data["as_of"]
+        count = 0
+        with get_db() as conn:
+            cur = conn.cursor()
+            for t in data["full_tx"]:
+                if t["date"] < as_of and not t["is_paid"]:
+                    cur.execute("INSERT OR IGNORE INTO paid_transactions (date, description) VALUES (?,?)",
+                                (str(t["date"]), t["desc"]))
+                    count += 1
+            conn.commit()
+        self.status_label.configure(text=f"Marked {count} past items as paid", text_color="#9ece6a")
+        if self.projection_win and self.projection_win.winfo_exists():
+            self.update_projection()
+        self.update_dashboard()
+
+    def _clear_all_paid(self):
+        if not messagebox.askyesno("Clear all paid flags",
+                                   "This will remove every paid mark.\n\nContinue?"):
+            return
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM paid_transactions")
+            conn.commit()
+        self.status_label.configure(text="All paid flags cleared", text_color="#9ece6a")
+        if self.projection_win and self.projection_win.winfo_exists():
+            self.update_projection()
+        self.update_dashboard()
 
     def _build_projection_content(self, win, data):
         tx = data["tx"]
+        full_tx = data["full_tx"]
         start_bal = data["start_bal"]
         as_of = data["as_of"]
         safe = data["safe"]
@@ -1686,50 +1943,60 @@ class BudgetApp(ctk.CTk):
         pay_amt = data["pay_amt"]
         bills_before = data["bills_before"]
         bal_after = data["bal_after"]
+        bal_label = data["bal_label"]
         buffer = data["buffer"]
         cat_totals = data["cat_totals"]
         has_primary = data.get("has_primary", False)
+        month_options = data["month_options"]
 
         sum_frame = ctk.CTkFrame(win, corner_radius=10)
-        sum_frame.pack(fill="x", padx=14, pady=10)
+        sum_frame.pack(fill="x", padx=14, pady=(8, 6))
 
-        # ----- Left: SAFE TO SPEND -----
-        left = ctk.CTkFrame(sum_frame, fg_color="transparent", width=200)
-        left.grid(row=0, column=0, padx=20, pady=10, sticky="nw")
+        # Left: SAFE TO SPEND + warning underneath
+        left = ctk.CTkFrame(sum_frame, fg_color="transparent", width=210)
+        left.grid(row=0, column=0, padx=16, pady=8, sticky="nw")
         left.grid_propagate(False)
 
         ctk.CTkLabel(left, text="SAFE TO SPEND",
                     font=ctk.CTkFont(family="Verdana", size=13, weight="bold")).pack(anchor="w")
-        color = "#9ece6a" if safe >= 0 else "#f7768e"
+        
+        # Theme-aware readable green
+        safe_color = "#2E7D32" if self.theme_var.get() == "Light" else "#9ece6a"
+        color = safe_color if safe >= 0 else "#f7768e"
+        
         ctk.CTkLabel(left, text=f"${safe:,.2f}",
                     font=ctk.CTkFont(family="Verdana", size=26, weight="bold"),
                     text_color=color).pack(anchor="w", pady=(2, 0))
+        
+        if safe < 0:
+            ctk.CTkLabel(left, text=f"⚠ Buffer short (${buffer})",
+                        text_color="#f7768e",
+                        font=ctk.CTkFont(family="Verdana", size=12, weight="bold")).pack(anchor="w", pady=(4, 0))
 
-        # ----- Middle: Period + Mode -----
+        # Middle: Period + Mode
         ctrl = ctk.CTkFrame(sum_frame, fg_color="transparent")
-        ctrl.grid(row=0, column=1, padx=30, pady=10, sticky="nw")
+        ctrl.grid(row=0, column=1, padx=20, pady=8, sticky="nw")
 
         ctk.CTkLabel(ctrl, text="Period:", font=ctk.CTkFont(family="Verdana", size=12)).grid(
-            row=0, column=0, sticky="e", padx=(0, 8), pady=4)
+            row=0, column=0, sticky="e", padx=(0, 8), pady=3)
         period_var = ctk.StringVar(
             value="Until Next Pay" if data["safe_period"] == "next_pay" else "Until End of Month")
         ctk.CTkOptionMenu(ctrl, values=["Until Next Pay", "Until End of Month"],
                         variable=period_var, width=170,
                         command=self._on_safe_period_change,
-                        font=ctk.CTkFont(family="Verdana", size=12)).grid(row=0, column=1, pady=4)
+                        font=ctk.CTkFont(family="Verdana", size=12)).grid(row=0, column=1, pady=3)
 
         ctk.CTkLabel(ctrl, text="Mode:", font=ctk.CTkFont(family="Verdana", size=12)).grid(
-            row=1, column=0, sticky="e", padx=(0, 8), pady=4)
+            row=1, column=0, sticky="e", padx=(0, 8), pady=3)
         mode_var = ctk.StringVar(value="Inclusive" if data["safe_inclusive"] else "Strict")
         ctk.CTkOptionMenu(ctrl, values=["Strict", "Inclusive"],
                         variable=mode_var, width=170,
                         command=self._on_safe_mode_change,
-                        font=ctk.CTkFont(family="Verdana", size=12)).grid(row=1, column=1, pady=4)
+                        font=ctk.CTkFont(family="Verdana", size=12)).grid(row=1, column=1, pady=3)
 
-        # ----- Right: Info block (fixed size) -----
-        info = ctk.CTkFrame(sum_frame, fg_color="transparent", width=320, height=110)
-        info.grid(row=0, column=2, padx=20, pady=10, sticky="nw")
-        info.grid_propagate(False)
+        # Right: Info block
+        info = ctk.CTkFrame(sum_frame, fg_color="transparent", width=340)
+        info.grid(row=0, column=2, padx=16, pady=8, sticky="nw")
 
         if has_primary:
             ctk.CTkLabel(info, text=f"Window: {data['period_label']}",
@@ -1747,18 +2014,11 @@ class BudgetApp(ctk.CTk):
             ctk.CTkLabel(info, text=income_text,
                         font=ctk.CTkFont(family="Verdana", size=13)).pack(anchor="w")
 
-            ctk.CTkLabel(info, text=f"Balance after next pay: ${bal_after:,.2f}",
+            ctk.CTkLabel(info, text=f"{bal_label}: ${bal_after:,.2f}",
                         font=ctk.CTkFont(family="Verdana", size=13)).pack(anchor="w")
         else:
             ctk.CTkLabel(info, text="No Primary Paycheck set", text_color="#f7768e",
                         font=ctk.CTkFont(family="Verdana", size=13, weight="bold")).pack(anchor="w")
-
-        if safe < 0:
-            ctk.CTkLabel(info, text=f"⚠ Buffer short (${buffer})", text_color="#f7768e",
-                        font=ctk.CTkFont(family="Verdana", size=13, weight="bold")).pack(anchor="w")
-        else:
-            ctk.CTkLabel(info, text="Tip: Double-click a row to toggle Paid", text_color="gray",
-                        font=ctk.CTkFont(family="Verdana", size=11)).pack(anchor="w", pady=(4, 0))
 
         content = ctk.CTkFrame(win, fg_color="transparent")
         content.pack(fill="both", expand=True, padx=14, pady=6)
@@ -1777,27 +2037,32 @@ class BudgetApp(ctk.CTk):
         tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
-        # Split into past (current month before as_of) and future
+        # Paid row styling (grey)
+        if self.theme_var.get() == "Light":
+            tree.tag_configure("paid", background="#e0e0e0", foreground="#666666")
+        else:
+            tree.tag_configure("paid", background="#3a3a3a", foreground="#aaaaaa")
+
         past_rows   = [t for t in tx if t["date"] < as_of]
         future_rows = [t for t in tx if t["date"] >= as_of]
 
-        # 1. Earlier bills/incomes in the current month
         for t in past_rows:
             paid_symbol = "☑" if t["is_paid"] else "☐"
             month_idx = t["date"].month - 1
+            tags = [f"month{month_idx}", f"{t['date']}|{t['desc']}"]
+            if t["is_paid"]:
+                tags.append("paid")
             tree.insert("", "end", values=(
                 t["date"], t["desc"], t["category"],
                 f"{t['income']:,.2f}" if t["income"] else "",
                 f"{t['expense']:,.2f}" if t["expense"] else "",
                 "—",
                 paid_symbol
-            ), tags=(f"month{month_idx}", f"{t['date']}|{t['desc']}"))
+            ), tags=tuple(tags))
 
-        # 2. Starting Balance row
         tree.insert("", "end", values=(as_of, "Starting Balance", "", "", "", f"{start_bal:,.2f}", ""),
                     tags=("startbal",))
 
-        # 3. Future rows with running balance (only unpaid amounts affect balance)
         balance = start_bal
         for t in future_rows:
             inc = t["income"] if not t["is_paid"] else 0.0
@@ -1805,12 +2070,15 @@ class BudgetApp(ctk.CTk):
             balance += inc - exp
             paid_symbol = "☑" if t["is_paid"] else "☐"
             month_idx = t["date"].month - 1
+            tags = [f"month{month_idx}", f"{t['date']}|{t['desc']}"]
+            if t["is_paid"]:
+                tags.append("paid")
             tree.insert("", "end", values=(
                 t["date"], t["desc"], t["category"],
                 f"{t['income']:,.2f}" if t["income"] else "",
                 f"{t['expense']:,.2f}" if t["expense"] else "",
                 f"{balance:,.2f}", paid_symbol
-            ), tags=(f"month{month_idx}", f"{t['date']}|{t['desc']}"))
+            ), tags=tuple(tags))
 
         colors = MONTH_COLORS_LIGHT if self.theme_var.get() == "Light" else MONTH_COLORS_DARK
         text_color = "#000000" if self.theme_var.get() == "Light" else "#e0e0e0"
@@ -1836,9 +2104,31 @@ class BudgetApp(ctk.CTk):
             new_data = self._generate_projection_data()
             if new_data:
                 self._refresh_projection_window(new_data)
+            self.update_dashboard()
 
         tree.bind("<Double-1>", toggle_paid)
 
+        # Clickable month colours → jump This Month dropdown
+        def on_row_click(event):
+            item = tree.identify_row(event.y)
+            if not item:
+                return
+            tags = tree.item(item, "tags")
+            if not tags or not str(tags[0]).startswith("month"):
+                return
+            try:
+                m_idx = int(str(tags[0])[5:])
+                for label, y, m in month_options:
+                    if m == m_idx + 1:
+                        self.month_var.set(label)
+                        self._update_month_panel(label)
+                        break
+            except Exception:
+                pass
+
+        tree.bind("<ButtonRelease-1>", on_row_click)
+
+        # RIGHT SIDE (Chart + This Month)
         chart_frame = ctk.CTkFrame(content, width=400, corner_radius=10)
         chart_frame.pack(side="right", fill="y")
         chart_frame.pack_propagate(False)
@@ -1847,92 +2137,160 @@ class BudgetApp(ctk.CTk):
                     font=ctk.CTkFont(family="Verdana", size=14, weight="bold")).pack(pady=(12, 6))
 
         if cat_totals:
-            fig, ax = plt.subplots(figsize=(4.0, 3.6), dpi=100)
+            n = len(cat_totals)
+            # Legend ~20% bigger
+            if n > 8:
+                fontsize, ncol, bottom, fig_h = 9.0, 3, 0.34, 4.25
+            elif n > 5:
+                fontsize, ncol, bottom, fig_h = 10, 2, 0.29, 4.15
+            else:
+                fontsize, ncol, bottom, fig_h = 10.6, 2, 0.27, 4.05
+
+            is_dark = self.theme_var.get() == "Dark"
+
+            fig, ax = plt.subplots(figsize=(3.95, fig_h), dpi=100)
+
+            if is_dark:
+                fig.patch.set_facecolor("#2b2b2b")
+                ax.set_facecolor("#2b2b2b")
+                legend_color = "#e0e0e0"
+            else:
+                fig.patch.set_facecolor("white")
+                ax.set_facecolor("white")
+                legend_color = "black"
 
             wedges, texts, autotexts = ax.pie(
                 list(cat_totals.values()),
                 labels=None,
                 autopct="%1.1f%%",
                 startangle=90,
-                colors=plt.cm.Set3.colors[:len(cat_totals)],
+                colors=plt.cm.Set3.colors[:n],
                 pctdistance=0.75
             )
 
             for autotext in autotexts:
                 autotext.set_fontsize(9)
-                autotext.set_color("black")
+                autotext.set_color("#333333" if is_dark else "black")
 
             ax.axis("equal")
 
             legend_labels = [f"{cat}  ${val:,.0f}" for cat, val in cat_totals.items()]
-            ax.legend(
-                wedges,
-                legend_labels,
+            legend = ax.legend(
+                wedges, legend_labels,
                 loc="upper center",
-                bbox_to_anchor=(0.5, -0.02),
-                ncol=2,
+                bbox_to_anchor=(0.5, -0.05),
+                ncol=ncol,
                 frameon=False,
-                fontsize=9,
-                handlelength=1.2,
+                fontsize=fontsize,
+                handlelength=1.1,
                 handletextpad=0.4,
-                columnspacing=1.2
+                columnspacing=1.0
             )
 
+            for text in legend.get_texts():
+                text.set_color(legend_color)
+
             fig.tight_layout()
-            fig.subplots_adjust(bottom=0.20)
+            fig.subplots_adjust(bottom=bottom)
 
             canvas = FigureCanvasTkAgg(fig, master=chart_frame)
             canvas.draw()
-            canvas.get_tk_widget().pack(pady=(0, 4), padx=10, expand=False)
+            canvas.get_tk_widget().pack(pady=(0, 4), padx=8, expand=False)
             plt.close(fig)
         else:
             ctk.CTkLabel(chart_frame, text="No expenses in next 30 days",
                         font=ctk.CTkFont(family="Verdana", size=13)).pack(pady=40)
-
-        # ---------- THIS MONTH panel ----------
+                                                
+        # THIS MONTH panel (tight spacing)
         this_month = ctk.CTkFrame(chart_frame, corner_radius=8,
                                   border_width=1, border_color=("#d0d0d0", "#555555"))
-        this_month.pack(fill="x", padx=10, pady=(8, 12))
+        this_month.pack(fill="x", padx=10, pady=(6, 10))
 
         ctk.CTkLabel(this_month, text="This Month",
-                     font=ctk.CTkFont(family="Verdana", size=13, weight="bold")).pack(pady=(8, 4))
+                     font=ctk.CTkFont(family="Verdana", size=13, weight="bold")).pack(pady=(8, 2))
 
-        # Income
-        inc_frame = ctk.CTkFrame(this_month, fg_color="transparent")
-        inc_frame.pack(fill="x", padx=12)
-        ctk.CTkLabel(inc_frame, text="Income:",
-                     font=ctk.CTkFont(family="Verdana", size=12)).pack(side="left")
-        ctk.CTkLabel(inc_frame, text=f"${data['month_income']:,.2f}",
-                     font=ctk.CTkFont(family="Verdana", size=12, weight="bold"),
-                     text_color="#2E7D32").pack(side="right")
+        this_month_labels = {}
+        self._month_panel_data = {
+            "full_tx": full_tx,
+            "labels": this_month_labels,
+            "options": month_options
+        }
 
-        # Expenses (ALL – paid + unpaid)
-        exp_frame = ctk.CTkFrame(this_month, fg_color="transparent")
-        exp_frame.pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(exp_frame, text="Expenses:",
-                     font=ctk.CTkFont(family="Verdana", size=12)).pack(side="left")
-        ctk.CTkLabel(exp_frame, text=f"${data['month_expense']:,.2f}",
-                     font=ctk.CTkFont(family="Verdana", size=12, weight="bold"),
-                     text_color="#C62828").pack(side="right")
+        month_labels = [opt[0] for opt in month_options]
+        self.month_var = ctk.StringVar(value=month_labels[0])
 
-        # Net
-        net_color = "#2E7D32" if data["month_net"] >= 0 else "#C62828"
-        net_frame = ctk.CTkFrame(this_month, fg_color="transparent")
-        net_frame.pack(fill="x", padx=12, pady=(2, 4))
-        ctk.CTkLabel(net_frame, text="Net:",
-                     font=ctk.CTkFont(family="Verdana", size=12, weight="bold")).pack(side="left")
-        ctk.CTkLabel(net_frame, text=f"${data['month_net']:,.2f}",
-                     font=ctk.CTkFont(family="Verdana", size=13, weight="bold"),
-                     text_color=net_color).pack(side="right")
+        def on_month_change(choice):
+            self._update_month_panel(choice)
 
-        # Still unpaid
-        unpaid_frame = ctk.CTkFrame(this_month, fg_color="transparent")
-        unpaid_frame.pack(fill="x", padx=12, pady=(0, 10))
-        ctk.CTkLabel(unpaid_frame, text="Still unpaid:",
-                     font=ctk.CTkFont(family="Verdana", size=11)).pack(side="left")
-        ctk.CTkLabel(unpaid_frame, text=f"${data['month_unpaid']:,.2f}",
-                     font=ctk.CTkFont(family="Verdana", size=11, weight="bold"),
-                     text_color="#E65100").pack(side="right")
+        month_menu = ctk.CTkOptionMenu(
+            this_month,
+            values=month_labels,
+            variable=self.month_var,
+            width=200,
+            command=on_month_change
+        )
+        month_menu.pack(pady=(0, 6))
+
+        def make_row(parent, title, key, color=None):
+            frame = ctk.CTkFrame(parent, fg_color="transparent")
+            frame.pack(fill="x", padx=12, pady=1)
+            ctk.CTkLabel(frame, text=title, font=ctk.CTkFont(family="Verdana", size=12)).pack(side="left")
+            lbl = ctk.CTkLabel(frame, text="$0.00",
+                               font=ctk.CTkFont(family="Verdana", size=12, weight="bold"),
+                               text_color=color)
+            lbl.pack(side="right")
+            this_month_labels[key] = lbl
+
+        make_row(this_month, "Income:", "income", "#2E7D32")
+        make_row(this_month, "Expenses:", "expense", "#C62828")
+        make_row(this_month, "Net:", "net")
+        make_row(this_month, "Still unpaid:", "unpaid", "#E65100")
+
+        ctk.CTkLabel(this_month, text="", height=6).pack()
+
+        self._update_month_panel(month_labels[0])
+
+    def _update_month_panel(self, choice):
+        if not hasattr(self, "_month_panel_data"):
+            return
+
+        data = self._month_panel_data
+        full_tx = data["full_tx"]
+        labels = data["labels"]
+        options = data["options"]
+
+        year = month = None
+        for label, y, m in options:
+            if label == choice:
+                year, month = y, m
+                break
+        if year is None:
+            return
+
+        month_start = date(year, month, 1)
+        if month == 12:
+            month_end = date(year + 1, 1, 1) - timedelta(days=1)
+        else:
+            month_end = date(year, month + 1, 1) - timedelta(days=1)
+
+        income = sum(t["income"] for t in full_tx if month_start <= t["date"] <= month_end)
+        expense = sum(t["expense"] for t in full_tx if month_start <= t["date"] <= month_end and t["expense"] > 0)
+        unpaid = sum(t["expense"] for t in full_tx
+                     if month_start <= t["date"] <= month_end and t["expense"] > 0 and not t["is_paid"])
+        net = income - expense
+
+        # Theme-aware colours
+        income_color = "#2E7D32" if self.theme_var.get() == "Light" else "#9ece6a"
+        net_color = income_color if net >= 0 else "#C62828"
+
+        labels["income"].configure(text=f"${income:,.2f}", text_color=income_color)
+        labels["expense"].configure(text=f"${expense:,.2f}")
+        labels["unpaid"].configure(text=f"${unpaid:,.2f}")
+        labels["net"].configure(text=f"${net:,.2f}", text_color=net_color)
+
+        safe_color = "#2E7D32" if self.theme_var.get() == "Light" else "#9ece6a"
+        net_color = safe_color if net >= 0 else "#C62828"
+        labels["net"].configure(text=f"${net:,.2f}", text_color=net_color)
 
 # ------------------------------------------------------------------
 # Entry point
