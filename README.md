@@ -1,36 +1,41 @@
-# Personal Budget Tracker (Beta v0.84)
+# Personal Budget Tracker (v0.90)
 
-A clean and modern desktop budget tracker built with Python + CustomTkinter.
+A clean, modern desktop budget tracker built with Python + CustomTkinter.
 
-## What's New in v0.84
-- Beautiful **Cool Gray Light theme** (much easier on the eyes)
-- Improved Dark theme pie chart (matches app frames)
-- Larger, more readable pie chart legend
-- **Quick Overview** dashboard on the main window (mini Safe-to-Spend + next 3 bills)
-- Paid rows now turn grey when marked as paid
-- Click any coloured month row to jump to that month in “This Month”
-- Safe-to-Spend Period & Mode are now remembered
-- New Actions menu: “Mark all past as paid” / “Clear all paid flags”
-- Negative amounts allowed (with confirmation warning)
-- Better date validation on all date fields
-- Income reorder (Up / Down buttons)
-- Many small UI polish improvements
+Track multiple budgets, expenses, incomes, and see a clear projection of your finances with Safe-to-Spend calculations, interactive charts, and paid/unpaid tracking.
+
+---
+
+## What's New in v0.90
+
+- Completely redesigned Projection header (responsive grid)
+- New Year / Month / Day dropdown End Date picker
+- Pie chart replaced with a space-efficient **Squarified Treemap**
+- Improved Running Balance chart (cleaner axes + better hover tooltips)
+- “Other” category in the treemap now has a detailed hover tooltip
+- Tips & Shortcuts window (wider, better aligned, easy to extend)
+- Many small UI and reliability improvements
+- Fixed calendar popup closing when clicking month/year headers
+
+---
 
 ## Features
-- Multiple budget files (`.db` files)
-- Bills & Incomes with flexible frequencies (Monthly, Bi-weekly, Quarterly, Annual, Weekly, etc.)
-- Primary Paycheck support (Days Interval + 3 Semi-monthly options)
-- Safe-to-Spend calculator  
-  - Period: Until Next Pay / Until End of Month (1st of next month)  
-  - Mode: Strict / Inclusive
+
+- Multiple independent budget files (`.db`)
+- Expenses & Incomes with flexible frequencies  
+  (Monthly, Bi-weekly, Weekly, Quarterly, Annual, One-time)
+- Main income (star) support
+- Safe-to-Spend calculator with customizable end date
 - Projection window with:
-  - Running balance
-  - Paid/Unpaid toggle (double-click) – rows turn grey when paid
-  - 30-day expense pie chart (theme-aware)
-  - This Month summary with 12-month dropdown
-- Quick Overview dashboard
-- Light (Cool Gray) / Dark theme
-- Remembers column widths and Safe-to-Spend settings
+  - Full transaction list + Running Balance
+  - Double-click to toggle Paid / Unpaid
+  - Interactive Squarified Treemap (Next 30 Days)
+  - “This Month” summary panel
+  - Click treemap blocks to highlight matching rows
+- Quick Overview dashboard on the main window
+- Light / Dark themes
+- Drag-and-drop reordering
+- Column width memory
 - Application icon included
 
 ---
@@ -38,10 +43,10 @@ A clean and modern desktop budget tracker built with Python + CustomTkinter.
 ## Option 1 – Download the ready-to-run version (Recommended)
 
 1. Go to the [Releases](../../releases) page
-2. Download `PersonalBudgetTracker_v0.84-beta.exe`
-3. Double-click it — no Python or installation needed
+2. Download the latest `.exe`
+3. Double-click it — no Python installation needed
 
-> Windows may show a SmartScreen warning the first time (normal for new apps).  
+> Windows may show a SmartScreen warning the first time (normal for new unsigned apps).  
 > Click **More info** → **Run anyway**.
 
 ---
@@ -54,4 +59,4 @@ A clean and modern desktop budget tracker built with Python + CustomTkinter.
 ### Steps
 ```bash
 pip install -r requirements.txt
-python budget_tracker.py
+python Budget_Tracker.py
