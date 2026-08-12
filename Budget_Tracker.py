@@ -1,8 +1,8 @@
-__version__ = "0.91"
+__version__ = "0.93"
 
 import customtkinter as ctk
 import sqlite3
-from tkinter import messagebox, ttk, Menu, filedialog, simpledialog
+from tkinter import messagebox, ttk, Menu, filedialog
 from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
 import calendar
@@ -21,7 +21,8 @@ import atexit
 # ------------------------------------------------------------------
 # Multi-budget support
 # ------------------------------------------------------------------
-CURRENT_DB = "budget.db"
+CURRENT_DB = None          # Will hold the full path
+CURRENT_DB_NAME = "budget.db"  # Just the filename (for display)
 
 def get_base_path():
     if getattr(sys, 'frozen', False):
@@ -29,35 +30,67 @@ def get_base_path():
     return os.path.dirname(os.path.abspath(__file__))
 
 def get_db_path(filename=None):
+    """Return the full path to the current database."""
+    if CURRENT_DB:
+        return CURRENT_DB
     if filename is None:
-        filename = CURRENT_DB
+        filename = "budget.db"
     return os.path.join(get_base_path(), filename)
 
 def get_last_budget_file():
     return os.path.join(get_base_path(), "last_budget.txt")
 
-def save_last_budget(name):
+def save_last_budget(full_path):
     try:
-        with open(get_last_budget_file(), "w") as f:
-            f.write(name)
+        with open(get_last_budget_file(), "w", encoding="utf-8") as f:
+            f.write(full_path)
     except Exception:
         pass
 
 def load_last_budget():
     try:
-        with open(get_last_budget_file(), "r") as f:
-            name = f.read().strip()
-            if name and os.path.exists(get_db_path(name)):
-                return name
+        with open(get_last_budget_file(), "r", encoding="utf-8") as f:
+            path = f.read().strip()
+            if path and os.path.isfile(path):
+                return path
     except Exception:
         pass
     return None
 
-def get_lock_path(db_name):
-    return os.path.join(get_base_path(), f".{db_name}.lock")
+def get_recent_budgets_file():
+    return os.path.join(get_base_path(), "recent_budgets.json")
 
-def acquire_lock(db_name):
-    lock_path = get_lock_path(db_name)
+def load_recent_budgets():
+    try:
+        with open(get_recent_budgets_file(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return [p for p in data if os.path.isfile(p)]
+    except Exception:
+        return []
+
+def save_recent_budget(full_path):
+    recent = load_recent_budgets()
+    full_path = os.path.abspath(full_path)
+
+    if full_path in recent:
+        recent.remove(full_path)
+    recent.insert(0, full_path)
+    recent = recent[:12]
+
+    try:
+        with open(get_recent_budgets_file(), "w", encoding="utf-8") as f:
+            json.dump(recent, f, indent=2)
+    except Exception:
+        pass
+
+def get_lock_path(db_path):
+    # Create a safe lock filename from the full path
+    import hashlib
+    h = hashlib.md5(db_path.encode("utf-8")).hexdigest()[:12]
+    return os.path.join(get_base_path(), f".lock_{h}")
+
+def acquire_lock(db_path):
+    lock_path = get_lock_path(db_path)
     try:
         if os.path.exists(lock_path):
             return False
@@ -67,8 +100,10 @@ def acquire_lock(db_name):
     except Exception:
         return False
 
-def release_lock(db_name):
-    lock_path = get_lock_path(db_name)
+def release_lock(db_path):
+    if not db_path:
+        return
+    lock_path = get_lock_path(db_path)
     try:
         if os.path.exists(lock_path):
             os.remove(lock_path)
@@ -319,91 +354,168 @@ class BudgetLauncher(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Select Budget")
-        self.geometry("460x420")
+        self.geometry("520x480")
         self.resizable(False, False)
         ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("blue")
 
         ctk.CTkLabel(self, text="Personal Budget Tracker",
-                     font=ctk.CTkFont(family="Verdana", size=20, weight="bold")).pack(pady=(20, 6))
-        ctk.CTkLabel(self, text="Choose a budget file or create a new one",
-                     font=ctk.CTkFont(family="Verdana", size=13)).pack(pady=(0, 15))
+                     font=ctk.CTkFont(family="Verdana", size=20, weight="bold")).pack(pady=(18, 4))
+        ctk.CTkLabel(self, text="Choose a recent budget or create a new one",
+                     font=ctk.CTkFont(family="Verdana", size=13)).pack(pady=(0, 12))
 
-        self.list_frame = ctk.CTkScrollableFrame(self, width=400, height=220)
-        self.list_frame.pack(pady=5)
+        self.list_frame = ctk.CTkFrame(self, width=460, height=260, corner_radius=10)
+        self.list_frame.pack(pady=5, padx=20, fill="both", expand=True)
+        self.list_frame.pack_propagate(False)
 
         self.selected_var = ctk.StringVar()
         self.refresh_list()
 
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(pady=20)
+        btn_frame.pack(pady=18)
 
         ctk.CTkButton(btn_frame, text="Open Selected", width=150, height=36,
                       command=self.open_selected,
                       font=ctk.CTkFont(family="Verdana", size=13, weight="bold")).pack(side="left", padx=8)
-        ctk.CTkButton(btn_frame, text="Create New…", width=150, height=36,
-                      command=self.create_new,
+
+        ctk.CTkButton(btn_frame, text="Browse…", width=110, height=36,
+                      command=self.browse_budget,
                       font=ctk.CTkFont(family="Verdana", size=13)).pack(side="left", padx=8)
+
+        ctk.CTkButton(btn_frame, text="Create New", width=130, height=36,
+                      command=self.create_new,
+                      font=ctk.CTkFont(family="Verdana", size=13, weight="bold")).pack(side="left", padx=8)
 
     def refresh_list(self):
         for w in self.list_frame.winfo_children():
             w.destroy()
 
-        files = sorted([f for f in os.listdir(get_base_path()) if f.lower().endswith(".db")])
-        if not files:
-            ctk.CTkLabel(self.list_frame, text="No budget files found.\nClick “Create New…” to start.",
-                         font=ctk.CTkFont(family="Verdana", size=13)).pack(pady=40)
+        recent = load_recent_budgets()
+
+        if not recent:
+            ctk.CTkLabel(
+                self.list_frame,
+                text="No recent budgets found.\nClick “Create New” or “Browse…” to get started.",
+                font=ctk.CTkFont(family="Verdana", size=13),
+                text_color="gray"
+            ).pack(expand=True)
             return
 
-        self.selected_var.set(files[0])
-        for f in files:
-            ctk.CTkRadioButton(self.list_frame, text=f, variable=self.selected_var, value=f,
-                               font=ctk.CTkFont(family="Verdana", size=13)).pack(anchor="w", padx=20, pady=4)
+        # Use a scrollable frame only when there are items
+        scroll = ctk.CTkScrollableFrame(self.list_frame, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=4, pady=4)
+
+        self.selected_var.set(recent[0])
+
+        for path in recent:
+            name = os.path.basename(path)
+            folder = os.path.dirname(path)
+
+            display = f"{name}   —   {folder}"
+            if len(display) > 70:
+                display = f"{name}   —   …{folder[-40:]}"
+
+            rb = ctk.CTkRadioButton(
+                scroll,
+                text=display,
+                variable=self.selected_var,
+                value=path,
+                font=ctk.CTkFont(family="Verdana", size=13)
+            )
+            rb.pack(anchor="w", padx=12, pady=4)
 
     def open_selected(self):
-        global CURRENT_DB
-        name = self.selected_var.get()
-        if not name:
-            messagebox.showwarning("Select a file", "Please select a budget file.")
+        path = self.selected_var.get()
+        if not path or not os.path.isfile(path):
+            messagebox.showwarning("Select a file", "Please select a valid budget file.")
             return
 
-        if not acquire_lock(name):
+        path = os.path.abspath(path)
+
+        if not acquire_lock(path):
             messagebox.showerror(
                 "Budget already open",
-                f"The budget file “{name}” is already open in another window.\n\n"
+                "This budget file is already open in another window.\n\n"
                 "Please close the other instance first."
             )
             return
 
-        CURRENT_DB = name
-        save_last_budget(name)
+        global CURRENT_DB, CURRENT_DB_NAME
+        CURRENT_DB = path
+        CURRENT_DB_NAME = os.path.basename(path)
+
+        save_last_budget(path)
+        save_recent_budget(path)
+
+        self.destroy()
+        app = BudgetApp()
+        app.mainloop()
+
+    def browse_budget(self):
+        path = filedialog.askopenfilename(
+            title="Select Budget File",
+            initialdir=os.path.expanduser("~"),
+            filetypes=[("Budget files", "*.db"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+
+        path = os.path.abspath(path)
+
+        if not acquire_lock(path):
+            messagebox.showerror(
+                "Budget already open",
+                "This budget file is already open in another window.\n\n"
+                "Please close the other instance first."
+            )
+            return
+
+        global CURRENT_DB, CURRENT_DB_NAME
+        CURRENT_DB = path
+        CURRENT_DB_NAME = os.path.basename(path)
+
+        save_last_budget(path)
+        save_recent_budget(path)
+
         self.destroy()
         app = BudgetApp()
         app.mainloop()
 
     def create_new(self):
-        name = simpledialog.askstring("New Budget", "Enter a name for the new budget\n(without .db extension):", parent=self)
-        if not name:
+        path = filedialog.asksaveasfilename(
+            title="Create New Budget",
+            initialdir=os.path.expanduser("~"),
+            defaultextension=".db",
+            filetypes=[("Budget files", "*.db"), ("All files", "*.*")]
+        )
+        if not path:
             return
-        name = name.strip()
-        if not name:
-            return
-        if not name.lower().endswith(".db"):
-            name += ".db"
 
-        if not acquire_lock(name):
+        path = os.path.abspath(path)
+
+        if not acquire_lock(path):
             messagebox.showerror(
                 "Budget already open",
-                f"The budget file “{name}” is already open in another window.\n\n"
+                "This budget file is already open in another window.\n\n"
                 "Please close the other instance first."
             )
             return
 
-        global CURRENT_DB
-        CURRENT_DB = name
-        open(get_db_path(name), "a").close()
+        try:
+            open(path, "a").close()
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not create file:\n{e}")
+            release_lock(path)
+            return
+
+        global CURRENT_DB, CURRENT_DB_NAME
+        CURRENT_DB = path
+        CURRENT_DB_NAME = os.path.basename(path)
+
         init_database()
-        save_last_budget(name)
+        save_last_budget(path)
+        save_recent_budget(path)
+
         self.destroy()
         app = BudgetApp()
         app.mainloop()
@@ -443,13 +555,12 @@ REVERSE_QUARTER_MAP = {v: k for k, v in QUARTER_MAP.items()}
 class BudgetApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title(f"Personal Budget Tracker — {CURRENT_DB}  (v{__version__})")
-        self.geometry("1280x850")
-        self.minsize(1100, 720)
+        self.title(f"Personal Budget Tracker — {CURRENT_DB_NAME}  (v{__version__})")
+        self.geometry("1450x980")
+        self.minsize(1300, 850)
 
         ctk.set_default_color_theme("blue")
 
-        self.projection_win = None
         self.editing_id = None
         self.editing_income_id = None
         self.hide_paid = False
@@ -624,52 +735,76 @@ class BudgetApp(ctk.CTk):
     def switch_budget(self):
         path = filedialog.askopenfilename(
             title="Select Budget File",
-            initialdir=get_base_path(),
+            initialdir=os.path.expanduser("~"),
+            filetypes=[("Budget files", "*.db"), ("All files", "*.*")]
+        )
+        if path:
+            self._load_budget(path)
+
+    def new_budget(self):
+        path = filedialog.asksaveasfilename(
+            title="Create New Budget",
+            initialdir=os.path.expanduser("~"),
+            defaultextension=".db",
             filetypes=[("Budget files", "*.db"), ("All files", "*.*")]
         )
         if not path:
             return
-        name = os.path.basename(path)
-        self._load_budget(name)
 
-    def new_budget(self):
-        name = simpledialog.askstring("New Budget", "Enter a name for the new budget\n(without .db extension):", parent=self)
-        if not name:
+        path = os.path.abspath(path)
+
+        try:
+            open(path, "a").close()
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not create file:\n{e}")
             return
-        name = name.strip()
-        if not name:
-            return
-        if not name.lower().endswith(".db"):
-            name += ".db"
-        open(get_db_path(name), "a").close()
-        self._load_budget(name)
 
-    def _load_budget(self, name):
-        global CURRENT_DB
+        self._load_budget(path)
 
-        if not acquire_lock(name):
+    def _load_budget(self, full_path):
+        global CURRENT_DB, CURRENT_DB_NAME
+
+        full_path = os.path.abspath(full_path)
+
+        if not acquire_lock(full_path):
             messagebox.showerror(
                 "Budget already open",
-                f"The budget file “{name}” is already open in another window.\n\n"
+                "This budget file is already open in another window.\n\n"
                 "Please close the other instance first."
             )
             return
 
-        release_lock(CURRENT_DB)
+        # Release the previous lock
+        if CURRENT_DB:
+            release_lock(CURRENT_DB)
 
-        if self.projection_win and self.projection_win.winfo_exists():
+        # Clear projection tab when switching budgets
+        try:
+            for w in self.projection_frame.winfo_children():
+                w.destroy()
             self._on_projection_close()
+        except Exception:
+            pass
 
-        CURRENT_DB = name
-        save_last_budget(name)
+        # Always return to the Budget tab after a switch
+        self.view_var.set("Budget")
+        self._on_view_change("Budget")
+
+        CURRENT_DB = full_path
+        CURRENT_DB_NAME = os.path.basename(full_path)
+
+        save_last_budget(full_path)
+        save_recent_budget(full_path)
+
         init_database()
-        self.title(f"Personal Budget Tracker — {CURRENT_DB}  (v{__version__})")
+
+        self.title(f"Personal Budget Tracker — {CURRENT_DB_NAME}  (v{__version__})")
         self.load_inputs()
         self.load_bills()
         self.load_incomes()
         self.bill_category.configure(values=self.get_categories())
         self.update_dashboard()
-        self.status_label.configure(text=f"Loaded {CURRENT_DB}", text_color="#9ece6a")
+        self.status_label.configure(text=f"Loaded {CURRENT_DB_NAME}", text_color="#9ece6a")
 
     def on_closing(self):
         release_lock(CURRENT_DB)
@@ -679,11 +814,11 @@ class BudgetApp(ctk.CTk):
         except Exception:
             pass
 
-        if self.projection_win is not None:
-            try:
-                self._on_projection_close()
-            except Exception:
-                pass
+        # Clean up matplotlib figures
+        try:
+            self._on_projection_close()
+        except Exception:
+            pass
 
         try:
             for after_id in self.tk.call("after", "info"):
@@ -736,80 +871,157 @@ class BudgetApp(ctk.CTk):
             tree.column(col, width=width)
 
     def create_widgets(self):
-        top = ctk.CTkFrame(self, height=52, corner_radius=0,
-                           fg_color=("#D1D5DB", "#2b2b2b"))
-        top.pack(fill="x")
-        top.pack_propagate(False)
+        # ========== TOP BAR (Budget / Projection + Theme) ==========
+        top_bar = ctk.CTkFrame(self, height=52, corner_radius=0,
+                            fg_color=("#D1D5DB", "#2b2b2b"))
+        top_bar.pack(fill="x")
+        top_bar.pack_propagate(False)
 
-        ctk.CTkLabel(top, text="Personal Budget Tracker",
-                     font=ctk.CTkFont(family="Verdana", size=20, weight="bold")).pack(side="left", padx=20)
+        # Left side – view switcher
+        self.view_var = ctk.StringVar(value="Budget")
+        self.view_switch = ctk.CTkSegmentedButton(
+            top_bar,
+            values=["Budget", "Projection"],
+            variable=self.view_var,
+            command=self._on_view_change,
+            font=ctk.CTkFont(family="Verdana", size=16, weight="bold"),
+            height=50,
+            width=400,
+            dynamic_resizing=False,
+            corner_radius=8,
 
-        theme_frame = ctk.CTkFrame(top, fg_color="transparent")
+                # ===== COLORS =====
+            fg_color=("#D1D5DB", "#404040"),          # background behind the buttons
+            selected_color=("#3B82F6", "#1F6AA5"),    # color of the active button
+            selected_hover_color=("#2563EB", "#144870"),
+            unselected_color=("#E5E7EB", "#2b2b2b"),  # color of the inactive button
+            unselected_hover_color=("#C5CAD3", "#404040"),
+            text_color=("#1F2937", "#ffffff"),        # text color
+
+        )
+        self.view_switch.pack(side="left", padx=1, pady=1)
+
+        # Right side – Theme picker (same horizontal level)
+        theme_frame = ctk.CTkFrame(top_bar, fg_color="transparent")
         theme_frame.pack(side="right", padx=20)
-        ctk.CTkLabel(theme_frame, text="Theme:", font=ctk.CTkFont(family="Verdana", size=13)).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(theme_frame, text="Theme:",
+                    font=ctk.CTkFont(family="Verdana", size=13)).pack(side="left", padx=(0, 8))
 
         self.theme_var = ctk.StringVar(value=self.last_theme)
+        ctk.CTkOptionMenu(
+            theme_frame,
+            values=["Light", "Dark"],
+            variable=self.theme_var,
+            command=self.change_theme,
+            width=110,
+            corner_radius=8,
+            font=ctk.CTkFont(family="Verdana", size=13)
+        ).pack(side="left")
 
-        ctk.CTkOptionMenu(theme_frame, values=["Light", "Dark"], variable=self.theme_var,
-                          command=self.change_theme, width=110, corner_radius=8,
-                          font=ctk.CTkFont(family="Verdana", size=13)).pack(side="left")
+        # ========== CONTENT AREA ==========
+        self.content_area = ctk.CTkFrame(self, fg_color="transparent")
+        self.content_area.pack(fill="both", expand=True)
 
+        # --- Budget view (current main screen) ---
+        self.budget_frame = ctk.CTkFrame(self.content_area, fg_color="transparent")
+        self.budget_frame.pack(fill="both", expand=True)
+
+        # --- Projection view (will be filled later) ---
+        self.projection_frame = ctk.CTkFrame(self.content_area, fg_color="transparent")
+        # (not packed yet)
+
+        # ========== BOTTOM BAR (always visible) ==========
         bottom_frame = ctk.CTkFrame(self, fg_color="transparent")
         bottom_frame.pack(side="bottom", fill="x", pady=(0, 10))
 
-        self.status_label = ctk.CTkLabel(bottom_frame, text="Ready", text_color="gray",
-                                         font=ctk.CTkFont(family="Verdana", size=12))
+        self.status_label = ctk.CTkLabel(
+            bottom_frame, text="Ready", text_color="gray",
+            font=ctk.CTkFont(family="Verdana", size=12)
+        )
         self.status_label.pack(pady=(0, 6))
 
-        ctk.CTkButton(bottom_frame, text="Update Projection", command=self.update_projection,
-                      width=280, height=44, corner_radius=10,
-                      fg_color="#1565C0", hover_color="#0D47A1",
-                      font=ctk.CTkFont(family="Verdana", size=15, weight="bold")).pack()
+        ctk.CTkButton(
+            bottom_frame, text="Update Projection", command=self.update_projection,
+            width=280, height=44, corner_radius=10,
+            fg_color="#1565C0", hover_color="#0D47A1",
+            font=ctk.CTkFont(family="Verdana", size=15, weight="bold")
+        ).pack()
 
-        self.main_container = ctk.CTkFrame(self, fg_color="transparent")
+        # ========== BUILD BUDGET CONTENT ==========
+        self._build_budget_content()
+
+    def _on_view_change(self, value):
+        if value == "Budget":
+            self.projection_frame.pack_forget()
+            self.budget_frame.pack(fill="both", expand=True)
+            self.status_label.configure(text="Ready", text_color="gray")
+        else:
+            self.budget_frame.pack_forget()
+            self.projection_frame.pack(fill="both", expand=True)
+            # Only rebuild if the tab is empty
+            if not self.projection_frame.winfo_children():
+                self.update_projection()
+
+    def _build_budget_content(self):
+        """Builds the original main screen inside the Budget tab."""
+        self.main_container = ctk.CTkFrame(self.budget_frame, fg_color="transparent")
         self.main_container.pack(fill="both", expand=True, padx=14, pady=(10, 0))
         self.main_container.grid_columnconfigure(0, weight=0)
         self.main_container.grid_columnconfigure(1, weight=1)
         self.main_container.grid_rowconfigure(0, weight=1)
 
-        self.left_frame = ctk.CTkFrame(self.main_container, width=280, corner_radius=12,
-                                       border_width=1, border_color=("#d0d0d0", "#555555"))
+        # ----- LEFT PANEL (Account Snapshot) -----
+        self.left_frame = ctk.CTkFrame(
+            self.main_container, width=280, corner_radius=12,
+            border_width=1, border_color=("#d0d0d0", "#555555")
+        )
         self.left_frame.grid(row=0, column=0, sticky="ns", padx=(0, 12))
         self.left_frame.grid_propagate(False)
 
-        ctk.CTkLabel(self.left_frame, text="Account Snapshot",
-                     font=ctk.CTkFont(family="Verdana", size=20, weight="bold")).pack(pady=(16, 12))
+        ctk.CTkLabel(
+            self.left_frame, text="Account Snapshot",
+            font=ctk.CTkFont(family="Verdana", size=20, weight="bold")
+        ).pack(pady=(16, 12))
 
         form = ctk.CTkFrame(self.left_frame, fg_color="transparent")
         form.pack(padx=14, pady=4)
 
-        ctk.CTkLabel(form, text="Current Balance ($):", font=ctk.CTkFont(family="Verdana", size=12)).grid(row=0, column=0, padx=6, pady=8, sticky="e")
-        self.balance_entry = ctk.CTkEntry(form, width=130, height=32, corner_radius=8, font=ctk.CTkFont(family="Verdana", size=12))
+        ctk.CTkLabel(form, text="Current Balance ($):",
+                    font=ctk.CTkFont(family="Verdana", size=12)).grid(row=0, column=0, padx=6, pady=8, sticky="e")
+        self.balance_entry = ctk.CTkEntry(form, width=130, height=32, corner_radius=8,
+                                        font=ctk.CTkFont(family="Verdana", size=12))
         self.balance_entry.grid(row=0, column=1, padx=6, pady=8)
 
-        ctk.CTkLabel(form, text="As of Date:", font=ctk.CTkFont(family="Verdana", size=12)).grid(row=1, column=0, padx=6, pady=8, sticky="e")
+        ctk.CTkLabel(form, text="As of Date:",
+                    font=ctk.CTkFont(family="Verdana", size=12)).grid(row=1, column=0, padx=6, pady=8, sticky="e")
         self.asof_entry = DateEntry(form, width=12, background="#2b2b2b", foreground="white",
                                     borderwidth=2, date_pattern="yyyy-mm-dd", font=("Verdana", 11))
         self.asof_entry.grid(row=1, column=1, padx=6, pady=8, sticky="w")
         self._fix_dateentry(self.asof_entry)
 
-        ctk.CTkLabel(form, text="Safety Buffer ($):", font=ctk.CTkFont(family="Verdana", size=12)).grid(row=2, column=0, padx=6, pady=8, sticky="e")
-        self.buffer_entry = ctk.CTkEntry(form, width=130, height=32, corner_radius=8, font=ctk.CTkFont(family="Verdana", size=12))
+        ctk.CTkLabel(form, text="Safety Buffer ($):",
+                    font=ctk.CTkFont(family="Verdana", size=12)).grid(row=2, column=0, padx=6, pady=8, sticky="e")
+        self.buffer_entry = ctk.CTkEntry(form, width=130, height=32, corner_radius=8,
+                                        font=ctk.CTkFont(family="Verdana", size=12))
         self.buffer_entry.grid(row=2, column=1, padx=6, pady=8)
 
-        ctk.CTkButton(self.left_frame, text="Save Inputs", command=self.save_inputs,
-                      width=180, height=38, corner_radius=8,
-                      font=ctk.CTkFont(family="Verdana", size=13, weight="bold")).pack(pady=(12, 8))
+        ctk.CTkButton(
+            self.left_frame, text="Save Inputs", command=self.save_inputs,
+            width=180, height=38, corner_radius=8,
+            font=ctk.CTkFont(family="Verdana", size=13, weight="bold")
+        ).pack(pady=(12, 8))
 
         dash = ctk.CTkFrame(self.left_frame, corner_radius=8,
                             border_width=1, border_color=("#d0d0d0", "#555555"))
         dash.pack(fill="x", padx=10, pady=(4, 12))
 
         ctk.CTkLabel(dash, text="Quick Overview",
-                     font=ctk.CTkFont(family="Verdana", size=14, weight="bold")).pack(pady=(8, 4))
+                    font=ctk.CTkFont(family="Verdana", size=14, weight="bold")).pack(pady=(8, 4))
 
-        self.dash_safe_label = ctk.CTkLabel(dash, text="Safe to Spend: —",
-                                            font=ctk.CTkFont(family="Verdana", size=13, weight="bold"))
+        self.dash_safe_label = ctk.CTkLabel(
+            dash, text="Safe to Spend: —",
+            font=ctk.CTkFont(family="Verdana", size=13, weight="bold")
+        )
         self.dash_safe_label.pack(anchor="w", padx=10, pady=(0, 4))
 
         WidgetTooltip(
@@ -821,20 +1033,19 @@ class BudgetApp(ctk.CTk):
         self.dash_bills_frame = ctk.CTkFrame(dash, fg_color="transparent")
         self.dash_bills_frame.pack(fill="x", padx=8, pady=(0, 8))
 
-        self.right_frame = ctk.CTkFrame(self.main_container, corner_radius=12,
-                                        border_width=1, border_color=("#d0d0d0", "#555555"))
+        # ----- RIGHT PANEL (Expenses / Incomes tabs) -----
+        self.right_frame = ctk.CTkFrame(
+            self.main_container, corner_radius=12,
+            border_width=1, border_color=("#d0d0d0", "#555555")
+        )
         self.right_frame.grid(row=0, column=1, sticky="nsew")
 
-        self.tabview = ctk.CTkTabview(
-            self.right_frame,
-            corner_radius=12,
-            border_width=0
-        )
+        self.tabview = ctk.CTkTabview(self.right_frame, corner_radius=12, border_width=0)
         self.tabview.pack(fill="both", expand=True, padx=10, pady=10)
         self.tabview.add("Expenses")
         self.tabview.add("Incomes")
 
-        # ---------- EXPENSES TAB ----------
+        # ========== EXPENSES TAB ==========
         bills_tab = self.tabview.tab("Expenses")
 
         add_frame = ctk.CTkFrame(bills_tab, corner_radius=10)
@@ -853,68 +1064,70 @@ class BudgetApp(ctk.CTk):
         cat_frame = ctk.CTkFrame(add_frame, fg_color="transparent")
         cat_frame.grid(row=0, column=5, padx=6, pady=5, sticky="w")
         self.bill_category = ctk.CTkComboBox(cat_frame, values=self.get_categories(),
-                                             width=130, height=30, corner_radius=6,
-                                             font=ctk.CTkFont(family="Verdana", size=12))
+                                            width=130, height=30, corner_radius=6,
+                                            font=ctk.CTkFont(family="Verdana", size=12))
         self.bill_category.set("Uncategorized")
         self.bill_category.pack(side="left")
         ctk.CTkButton(cat_frame, text="Manage…", width=70, height=26,
-                      font=ctk.CTkFont(family="Verdana", size=11),
-                      command=self.manage_categories).pack(side="left", padx=(6, 0))
+                    font=ctk.CTkFont(family="Verdana", size=11),
+                    command=self.manage_categories).pack(side="left", padx=(6, 0))
 
         ctk.CTkLabel(add_frame, text="Frequency:", font=ctk.CTkFont(family="Verdana", size=12)).grid(row=1, column=0, padx=6, pady=5, sticky="e")
         self.bill_freq = ctk.CTkComboBox(add_frame, values=EXPENSE_FREQ_OPTIONS,
-                                         width=120, height=30, corner_radius=6,
-                                         command=self.on_frequency_change,
-                                         font=ctk.CTkFont(family="Verdana", size=12))
+                                        width=120, height=30, corner_radius=6,
+                                        command=self.on_frequency_change,
+                                        font=ctk.CTkFont(family="Verdana", size=12))
         self.bill_freq.set("Monthly")
         self.bill_freq.grid(row=1, column=1, padx=6, pady=5)
 
         ctk.CTkLabel(add_frame, text="Next Due Date:", font=ctk.CTkFont(family="Verdana", size=12)).grid(row=1, column=2, padx=6, pady=5, sticky="e")
         self.bill_anchor = DateEntry(add_frame, width=14, background="#2b2b2b", foreground="white",
-                                     borderwidth=2, date_pattern="yyyy-mm-dd", font=("Verdana", 11))
+                                    borderwidth=2, date_pattern="yyyy-mm-dd", font=("Verdana", 11))
         self.bill_anchor.grid(row=1, column=3, padx=6, pady=5, sticky="w")
         self._fix_dateentry(self.bill_anchor)
 
         self.bill_month_label = ctk.CTkLabel(add_frame, text="Quarter Cycle:", font=ctk.CTkFont(family="Verdana", size=12))
         self.bill_month_label.grid(row=1, column=4, padx=6, pady=5, sticky="e")
         self.bill_month = ctk.CTkComboBox(add_frame, values=QUARTER_OPTIONS, width=160, height=30,
-                                          font=ctk.CTkFont(family="Verdana", size=12))
+                                        font=ctk.CTkFont(family="Verdana", size=12))
         self.bill_month.set("Jan / Apr / Jul / Oct")
         self.bill_month.grid(row=1, column=5, padx=6, pady=5)
 
         ctk.CTkLabel(add_frame, text="Notes:", font=ctk.CTkFont(family="Verdana", size=12)).grid(row=2, column=0, padx=6, pady=5, sticky="e")
         self.bill_notes_entry = ctk.CTkEntry(add_frame, width=520, height=30, corner_radius=6,
-                                             font=ctk.CTkFont(family="Verdana", size=12))
+                                            font=ctk.CTkFont(family="Verdana", size=12))
         self.bill_notes_entry.grid(row=2, column=1, columnspan=5, padx=6, pady=5, sticky="w")
 
         btn_frame = ctk.CTkFrame(add_frame, fg_color="transparent")
         btn_frame.grid(row=3, column=0, columnspan=6, pady=12)
 
         self.add_btn = ctk.CTkButton(btn_frame, text="Add Expense", command=self.add_bill, width=120, height=32, corner_radius=8,
-                                     fg_color="#2E7D32", hover_color="#1B5E20",
-                                     font=ctk.CTkFont(family="Verdana", size=12, weight="bold"))
+                                    fg_color="#2E7D32", hover_color="#1B5E20",
+                                    font=ctk.CTkFont(family="Verdana", size=12, weight="bold"))
         self.add_btn.pack(side="left", padx=5)
 
         self.update_bill_btn = ctk.CTkButton(btn_frame, text="Update Expense", command=self.update_bill, width=130, height=32,
-                                             corner_radius=8, state="disabled", font=ctk.CTkFont(family="Verdana", size=12))
+                                            corner_radius=8, state="disabled", font=ctk.CTkFont(family="Verdana", size=12))
         self.update_bill_btn.pack(side="left", padx=5)
 
         self.cancel_edit_btn = ctk.CTkButton(btn_frame, text="Cancel", command=self.cancel_edit, width=90, height=32,
-                                             corner_radius=8, fg_color="gray40", state="disabled",
-                                             font=ctk.CTkFont(family="Verdana", size=12))
+                                            corner_radius=8, fg_color="gray40", state="disabled",
+                                            font=ctk.CTkFont(family="Verdana", size=12))
         self.cancel_edit_btn.pack(side="left", padx=5)
 
         table_frame = ctk.CTkFrame(bills_tab, corner_radius=10)
         table_frame.pack(fill="both", expand=True, pady=8)
 
-        cols = ("id", "name", "amount", "category", "frequency", "next", "month")
+        cols = ("name", "amount", "category", "frequency", "next", "month")
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=12)
 
-        headings = {"id": "ID", "name": "Name", "amount": "Amount", "category": "Category",
-                    "frequency": "Freq", "next": "Next Due", "month": "Cycle / Month"}
+        headings = {
+            "name": "Name", "amount": "Amount", "category": "Category",
+            "frequency": "Freq", "next": "Next Due", "month": "Cycle / Month"
+        }
         defaults = {
-            "id": 60, "name": 150, "amount": 90, "category": 110,
-            "frequency": 90, "next": 110, "month": 120
+            "name": 160, "amount": 90, "category": 120,
+            "frequency": 95, "next": 110, "month": 130
         }
 
         for c in cols:
@@ -932,7 +1145,11 @@ class BudgetApp(ctk.CTk):
         def get_bill_note(item):
             vals = self.tree.item(item, "values")
             if vals:
-                return self.bill_notes.get(vals[0], "")
+                # notes are stored by id, but we no longer show id — we use iid
+                try:
+                    return self.bill_notes.get(int(item), "")
+                except Exception:
+                    return ""
             return ""
         TreeviewTooltip(self.tree, get_bill_note)
 
@@ -955,7 +1172,7 @@ class BudgetApp(ctk.CTk):
         ctk.CTkButton(btn_group, text="↓ Down", command=self.move_bill_down, width=80, height=30, corner_radius=8).pack(side="left", padx=3)
         ctk.CTkButton(btn_group, text="Edit", command=self.start_edit_bill, width=90, height=30, corner_radius=8).pack(side="left", padx=3)
         ctk.CTkButton(btn_group, text="Delete", command=self.delete_bill, width=90, height=30, corner_radius=8,
-                      fg_color="#C62828", hover_color="#8E0000").pack(side="left", padx=3)
+                    fg_color="#C62828", hover_color="#8E0000").pack(side="left", padx=3)
 
         ctk.CTkLabel(action_frame, text="   ").pack(side="left")
 
@@ -963,12 +1180,12 @@ class BudgetApp(ctk.CTk):
         self.search_var = ctk.StringVar()
         self.search_var.trace_add("write", self.filter_bills)
         ctk.CTkEntry(action_frame, textvariable=self.search_var, width=240, height=32, corner_radius=8,
-                     placeholder_text="Filter by name or category...",
-                     font=ctk.CTkFont(family="Verdana", size=12)).pack(side="left")
+                    placeholder_text="Filter by name or category...",
+                    font=ctk.CTkFont(family="Verdana", size=12)).pack(side="left")
 
         ctk.CTkLabel(action_frame, text="").pack(side="left", expand=True)
 
-        # ---------- INCOMES TAB ----------
+        # ========== INCOMES TAB ==========
         incomes_tab = self.tabview.tab("Incomes")
 
         inc_frame = ctk.CTkFrame(incomes_tab, corner_radius=10)
@@ -988,16 +1205,15 @@ class BudgetApp(ctk.CTk):
         self.inc_type.grid(row=0, column=3, padx=6, pady=5)
 
         self.star_btn = ctk.CTkButton(inc_frame, text="☆", width=36, height=30,
-                                      font=ctk.CTkFont(size=16),
-                                      fg_color="transparent", hover_color=("#e0e0e0", "#3a3a3a"),
-                                      command=self.toggle_main_star)
+                                    font=ctk.CTkFont(size=16),
+                                    fg_color="transparent", hover_color=("#e0e0e0", "#3a3a3a"),
+                                    command=self.toggle_main_star)
         self.star_btn.grid(row=0, column=4, padx=(4, 0), pady=5)
-        self.star_btn.grid_remove()
         WidgetTooltip(self.star_btn, "Mark as your main income source")
 
-        ctk.CTkLabel(inc_frame, text="Amount / Rate:", font=ctk.CTkFont(family="Verdana", size=12)).grid(row=0, column=5, padx=6, pady=5, sticky="e")
+        ctk.CTkLabel(inc_frame, text="Amount / Rate:", font=ctk.CTkFont(family="Verdana", size=12)).grid(row=0, column=5, padx=(16, 6), pady=5, sticky="e")
         self.inc_amount = ctk.CTkEntry(inc_frame, width=110, height=30, corner_radius=6, font=ctk.CTkFont(family="Verdana", size=12))
-        self.inc_amount.grid(row=0, column=6, padx=6, pady=5)
+        self.inc_amount.grid(row=0, column=6, padx=(6), pady=5, sticky="w")
 
         self.inc_hours_label = ctk.CTkLabel(inc_frame, text="Hours:", font=ctk.CTkFont(family="Verdana", size=12))
         self.inc_hours_label.grid(row=1, column=0, padx=6, pady=5, sticky="e")
@@ -1020,7 +1236,7 @@ class BudgetApp(ctk.CTk):
         self.inc_month_label = ctk.CTkLabel(inc_frame, text="Quarter Cycle:", font=ctk.CTkFont(family="Verdana", size=12))
         self.inc_month_label.grid(row=2, column=2, padx=6, pady=5, sticky="e")
         self.inc_month = ctk.CTkComboBox(inc_frame, values=QUARTER_OPTIONS, width=160, height=30,
-                                         font=ctk.CTkFont(family="Verdana", size=12))
+                                        font=ctk.CTkFont(family="Verdana", size=12))
         self.inc_month.set("Jan / Apr / Jul / Oct")
         self.inc_month.grid(row=2, column=3, padx=6, pady=5)
 
@@ -1032,9 +1248,9 @@ class BudgetApp(ctk.CTk):
         inc_btn_frame.grid(row=4, column=0, columnspan=7, pady=10)
 
         self.add_inc_btn = ctk.CTkButton(inc_btn_frame, text="Add Income", command=self.add_income,
-                                         width=120, height=32, corner_radius=8,
-                                         fg_color="#2E7D32", hover_color="#1B5E20",
-                                         font=ctk.CTkFont(family="Verdana", size=12, weight="bold"))
+                                        width=120, height=32, corner_radius=8,
+                                        fg_color="#2E7D32", hover_color="#1B5E20",
+                                        font=ctk.CTkFont(family="Verdana", size=12, weight="bold"))
         self.add_inc_btn.pack(side="left", padx=5)
 
         self.update_inc_btn = ctk.CTkButton(inc_btn_frame, text="Update Income", command=self.update_income,
@@ -1050,15 +1266,15 @@ class BudgetApp(ctk.CTk):
         inc_table_frame = ctk.CTkFrame(incomes_tab, corner_radius=10)
         inc_table_frame.pack(fill="both", expand=True, pady=8)
 
-        inc_cols = ("id", "name", "type", "amount", "primary", "frequency", "next")
+        inc_cols = ("name", "type", "amount", "primary", "frequency", "next")
         self.inc_tree = ttk.Treeview(inc_table_frame, columns=inc_cols, show="headings", height=10)
 
         defaults_inc = {
-            "id": 60, "name": 150, "type": 100, "amount": 90,
+            "name": 160, "type": 100, "amount": 90,
             "primary": 70, "frequency": 100, "next": 110
         }
 
-        for c, h in zip(inc_cols, ["ID", "Name", "Type", "Amount", "Main", "Frequency", "Next Date"]):
+        for c, h in zip(inc_cols, ["Name", "Type", "Amount", "Main", "Frequency", "Next Date"]):
             self.inc_tree.heading(c, text=h)
             self.inc_tree.column(c, width=defaults_inc[c], anchor="center")
 
@@ -1071,10 +1287,10 @@ class BudgetApp(ctk.CTk):
         inc_scroll.pack(side="right", fill="y")
 
         def get_inc_note(item):
-            vals = self.inc_tree.item(item, "values")
-            if vals:
-                return self.inc_notes.get(vals[0], "")
-            return ""
+            try:
+                return self.inc_notes.get(int(item), "")
+            except Exception:
+                return ""
         TreeviewTooltip(self.inc_tree, get_inc_note)
 
         self.inc_tree.bind("<Delete>", lambda e: self.delete_income())
@@ -1096,7 +1312,7 @@ class BudgetApp(ctk.CTk):
         ctk.CTkButton(inc_btn_group, text="↓ Down", command=self.move_income_down, width=80, height=30, corner_radius=8).pack(side="left", padx=3)
         ctk.CTkButton(inc_btn_group, text="Edit", command=self.start_edit_income, width=90, height=30, corner_radius=8).pack(side="left", padx=3)
         ctk.CTkButton(inc_btn_group, text="Delete", command=self.delete_income, width=90, height=30, corner_radius=8,
-                      fg_color="#C62828", hover_color="#8E0000").pack(side="left", padx=3)
+                    fg_color="#C62828", hover_color="#8E0000").pack(side="left", padx=3)
 
         ctk.CTkLabel(inc_action_frame, text="").pack(side="left", expand=True)
 
@@ -1171,11 +1387,8 @@ class BudgetApp(ctk.CTk):
         item = children.pop(from_idx)
         children.insert(to_idx, item)
 
-        new_order_ids = []
-        for iid in children:
-            vals = tree.item(iid, "values")
-            if vals:
-                new_order_ids.append(int(vals[0]))
+        # Now the children list contains the database IDs (because we used iid=str(id))
+        new_order_ids = [int(iid) for iid in children]
 
         with get_db() as conn:
             cur = conn.cursor()
@@ -1204,6 +1417,8 @@ class BudgetApp(ctk.CTk):
             cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                         ("theme", choice))
             conn.commit()
+        if self.view_var.get() == "Projection" and self.projection_frame.winfo_children():
+            self.update_projection()
 
     def apply_theme(self, theme):
         style = ttk.Style()
@@ -1250,6 +1465,19 @@ class BudgetApp(ctk.CTk):
                 corner_radius=10,
                 border_width=0
             )
+
+            try:
+                self.view_switch.configure(
+                    fg_color="#D1D5DB",
+                    selected_color="#3B82F6",
+                    selected_hover_color="#2563EB",
+                    unselected_color="#E5E7EB",
+                    unselected_hover_color="#C5CAD3",
+                    text_color="#1F2937"
+                )
+            except Exception:
+                pass
+
             try:
                 self.left_frame.configure(fg_color=soft_card, border_color=border_color)
                 self.right_frame.configure(fg_color=soft_card, border_color=border_color)
@@ -1291,6 +1519,17 @@ class BudgetApp(ctk.CTk):
                 border_width=0
             )
             try:
+                self.view_switch.configure(
+                    fg_color="#404040",
+                    selected_color="#1F6AA5",
+                    selected_hover_color="#144870",
+                    unselected_color="#2b2b2b",
+                    unselected_hover_color="#404040",
+                    text_color="#ffffff"
+                )
+            except Exception:
+                pass
+            try:
                 self.left_frame.configure(fg_color="#2b2b2b", border_color="#555555")
                 self.right_frame.configure(fg_color="#2b2b2b", border_color="#555555")
                 self.main_container.configure(fg_color="#1a1a1a")
@@ -1315,13 +1554,9 @@ class BudgetApp(ctk.CTk):
             self.inc_hours.grid_remove()
             self.inc_hours.delete(0, "end")
 
-        if choice == "Fixed":
-            self.star_btn.grid()
-            self._update_star_visual()
-        else:
-            self.star_btn.grid_remove()
-            self.form_is_main = False
-            self._update_star_visual()
+        # Star is now available for every income type
+        self.star_btn.grid()
+        self._update_star_visual()
 
         self.on_income_freq_change(self.inc_freq.get())
 
@@ -1556,12 +1791,12 @@ class BudgetApp(ctk.CTk):
         sel = self.tree.selection()
         if not sel:
             return
-        vals = self.tree.item(sel[0])["values"]
-        self.editing_id = vals[0]
+
+        self.editing_id = int(sel[0])   # iid is the database ID
 
         with get_db() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT name, amount, category, frequency, month, anchor_date, notes FROM bills WHERE id=?", (vals[0],))
+            cur.execute("SELECT name, amount, category, frequency, month, anchor_date, notes FROM bills WHERE id=?", (self.editing_id,))
             row = cur.fetchone()
 
         if not row:
@@ -1653,31 +1888,43 @@ class BudgetApp(ctk.CTk):
         search = self.search_var.get().lower().strip()
         for i in self.tree.get_children():
             self.tree.delete(i)
+
         for row in getattr(self, "all_bills", []):
+            # row = (id, name, amount, category, frequency, anchor_date, month, notes)
             if search in str(row[1]).lower() or search in str(row[3] or "").lower() or not search:
-                r = list(row[:7])
-                freq = r[4] or ""
-                month_val = r[6]
+                freq = row[4] or ""
+                month_val = row[6]
+                month_display = ""
                 if month_val:
                     if freq == "Quarterly":
-                        r[6] = REVERSE_QUARTER_MAP.get(month_val, month_val)
+                        month_display = REVERSE_QUARTER_MAP.get(month_val, month_val)
                     elif freq == "Annual":
-                        r[6] = calendar.month_abbr[month_val] if 1 <= month_val <= 12 else str(month_val)
+                        month_display = calendar.month_abbr[month_val] if 1 <= month_val <= 12 else str(month_val)
                     else:
-                        r[6] = str(month_val)
-                else:
-                    r[6] = ""
-                self.tree.insert("", "end", values=r)
+                        month_display = str(month_val)
+
+                # Use the database ID as the Treeview item id
+                self.tree.insert("", "end", iid=str(row[0]), values=(
+                    row[1],               # name
+                    f"{row[2]:,.2f}" if row[2] is not None else "",
+                    row[3] or "",
+                    freq,
+                    row[5] or "",
+                    month_display
+                ))
 
     def delete_bill(self):
         sel = self.tree.selection()
         if not sel:
             return
-        vals = self.tree.item(sel[0])["values"]
-        if messagebox.askyesno("Confirm", f"Delete expense '{vals[1]}'?"):
+
+        bill_id = int(sel[0])
+        name = self.tree.item(sel[0])["values"][0]  # Name is now first column
+
+        if messagebox.askyesno("Confirm", f"Delete expense '{name}'?"):
             with get_db() as conn:
                 cur = conn.cursor()
-                cur.execute("DELETE FROM bills WHERE id=?", (vals[0],))
+                cur.execute("DELETE FROM bills WHERE id=?", (bill_id,))
                 conn.commit()
             self.load_bills()
             self.clear_bill_form()
@@ -1693,13 +1940,16 @@ class BudgetApp(ctk.CTk):
         sel = self.tree.selection()
         if not sel:
             return
-        bill_id = self.tree.item(sel[0])["values"][0]
+
+        bill_id = int(sel[0])
+
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute("SELECT id, sort_order FROM bills ORDER BY sort_order, id")
             rows = cur.fetchall()
             ids = [r[0] for r in rows]
             orders = [r[1] for r in rows]
+
             try:
                 idx = ids.index(bill_id)
                 new_idx = idx + direction
@@ -1709,6 +1959,7 @@ class BudgetApp(ctk.CTk):
                     conn.commit()
             except Exception:
                 pass
+
         self.load_bills()
 
     def clear_income_form(self):
@@ -1775,14 +2026,14 @@ class BudgetApp(ctk.CTk):
         sel = self.inc_tree.selection()
         if not sel:
             return
-        vals = self.inc_tree.item(sel[0])["values"]
-        self.editing_income_id = vals[0]
+
+        self.editing_income_id = int(sel[0])  # iid is the database ID
 
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute("""SELECT name, type, amount, hours, frequency, due_day, month,
-                                  notes, is_primary, anchor_date
-                           FROM incomes WHERE id=?""", (vals[0],))
+                                notes, is_primary, anchor_date
+                        FROM incomes WHERE id=?""", (self.editing_income_id,))
             row = cur.fetchone()
 
         if not row:
@@ -1875,27 +2126,36 @@ class BudgetApp(ctk.CTk):
         for i in self.inc_tree.get_children():
             self.inc_tree.delete(i)
         self.inc_notes = {}
+
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute("""SELECT id, name, type, amount, is_primary, frequency, anchor_date, notes
-                           FROM incomes ORDER BY is_primary DESC, sort_order, id""")
+                        FROM incomes ORDER BY is_primary DESC, sort_order, id""")
             for row in cur.fetchall():
                 primary_str = "★" if row[4] else ""
-                next_str = row[6] or ""
                 self.inc_notes[row[0]] = row[7] or ""
-                self.inc_tree.insert("", "end", values=(
-                    row[0], row[1], row[2], row[3], primary_str, row[5], next_str
+
+                self.inc_tree.insert("", "end", iid=str(row[0]), values=(
+                    row[1],               # name
+                    row[2],               # type
+                    f"{row[3]:,.2f}" if row[3] is not None else "",
+                    primary_str,
+                    row[5] or "",
+                    row[6] or ""
                 ))
 
     def delete_income(self):
         sel = self.inc_tree.selection()
         if not sel:
             return
-        vals = self.inc_tree.item(sel[0])["values"]
-        if messagebox.askyesno("Confirm", f"Delete income '{vals[1]}'?"):
+
+        income_id = int(sel[0])
+        name = self.inc_tree.item(sel[0])["values"][0]
+
+        if messagebox.askyesno("Confirm", f"Delete income '{name}'?"):
             with get_db() as conn:
                 cur = conn.cursor()
-                cur.execute("DELETE FROM incomes WHERE id=?", (vals[0],))
+                cur.execute("DELETE FROM incomes WHERE id=?", (income_id,))
                 conn.commit()
             self.load_incomes()
             self.clear_income_form()
@@ -1911,13 +2171,16 @@ class BudgetApp(ctk.CTk):
         sel = self.inc_tree.selection()
         if not sel:
             return
-        income_id = self.inc_tree.item(sel[0])["values"][0]
+
+        income_id = int(sel[0])
+
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute("SELECT id, sort_order FROM incomes WHERE is_primary=0 ORDER BY sort_order, id")
             rows = cur.fetchall()
             ids = [r[0] for r in rows]
             orders = [r[1] for r in rows]
+
             try:
                 idx = ids.index(income_id)
                 new_idx = idx + direction
@@ -1929,6 +2192,7 @@ class BudgetApp(ctk.CTk):
                 pass
             except Exception:
                 pass
+
         self.load_incomes()
 
     def update_dashboard(self):
@@ -1963,15 +2227,25 @@ class BudgetApp(ctk.CTk):
                 ctk.CTkLabel(self.dash_bills_frame, text=txt,
                              font=ctk.CTkFont(family="Verdana", size=12)).pack(anchor="w")
 
+    def _rebuild_projection(self, data):
+        """Clear the Projection tab and rebuild it with the given data."""
+        for w in self.projection_frame.winfo_children():
+            w.destroy()
+        self._build_projection_content(self.projection_frame, data)
+
     def update_projection(self):
         try:
             data = self._generate_projection_data()
             if data is None:
                 return
-            if self.projection_win and self.projection_win.winfo_exists():
-                self._refresh_projection_window(data)
-            else:
-                self._create_projection_window(data)
+
+            self._rebuild_projection(data)
+
+            # Only switch tab if we are not already on Projection
+            if self.view_var.get() != "Projection":
+                self.view_var.set("Projection")
+                self._on_view_change("Projection")
+
         except Exception as e:
             messagebox.showerror("Projection Error", str(e))
 
@@ -1989,8 +2263,8 @@ class BudgetApp(ctk.CTk):
             as_of = datetime.strptime(inp[1], "%Y-%m-%d").date()
             buffer = float(inp[2] or 500)
 
-            cur.execute("""SELECT name, amount, frequency, anchor_date
-                           FROM incomes WHERE is_primary=1 LIMIT 1""")
+            cur.execute("""SELECT name, type, amount, hours, frequency, anchor_date
+                        FROM incomes WHERE is_primary=1 LIMIT 1""")
             primary = cur.fetchone()
 
             cur.execute("""SELECT name, type, amount, hours, frequency, due_day, month, is_primary, anchor_date, notes
@@ -2011,10 +2285,14 @@ class BudgetApp(ctk.CTk):
         all_paychecks = []
         pay_amt = 0.0
         next_pay = as_of + timedelta(days=14)
+        primary_name = "Paycheck"          # safe default
 
         if primary:
-            _, pay_amt, schedule, anchor_str = primary
-            pay_amt = float(pay_amt or 0)
+            primary_name, typ, amount, hours, schedule, anchor_str = primary
+            primary_name = primary_name or "Paycheck"
+            amount = float(amount or 0)
+            hours = float(hours or 0)
+            pay_amt = amount * hours if typ == "Hourly" else amount            
             try:
                 next_pay = datetime.strptime(anchor_str, "%Y-%m-%d").date()
             except Exception:
@@ -2065,11 +2343,11 @@ class BudgetApp(ctk.CTk):
 
         for pdate in all_paychecks:
             if lookback <= pdate <= end_date:
-                key = f"{pdate}|Paycheck"
+                key = f"{pdate}|{primary_name}"
                 paid = key in previously_paid
                 tx.append({
                     "date": pdate,
-                    "desc": "Paycheck",
+                    "desc": primary_name,        # ← now uses the real name
                     "category": "Income",
                     "income": pay_amt,
                     "expense": 0.0,
@@ -2269,16 +2547,11 @@ class BudgetApp(ctk.CTk):
 
         thirty = as_of + timedelta(days=30)
         cat_totals = {}
-        total_inc = total_exp = 0.0
         for t in full_tx:
             if as_of <= t["date"] <= thirty:
-                total_inc += unpaid_income(t)
                 exp = unpaid_expense(t)
                 if exp > 0:
-                    total_exp += exp
                     cat_totals[t["category"]] = cat_totals.get(t["category"], 0) + exp
-        if total_inc - total_exp > 0:
-            cat_totals["Savings"] = total_inc - total_exp
 
         month_options = []
         for i in range(12):
@@ -2307,28 +2580,8 @@ class BudgetApp(ctk.CTk):
             "month_options": month_options,
         }
 
-    def _create_projection_window(self, data):
-        win = ctk.CTkToplevel(self)
-        win.title(f"Budget Projection — {CURRENT_DB}")
-        x = self.winfo_x() + 80
-        y = self.winfo_y() + 40
-        win.geometry(f"1280x920+{x}+{y}")
-        win.protocol("WM_DELETE_WINDOW", self._on_projection_close)
-
-        win.after(50, lambda: (win.lift(), win.focus_force()))
-        self.projection_win = win
-        self._build_projection_content(win, data)
-
-    def _refresh_projection_window(self, data):
-        if not self.projection_win or not self.projection_win.winfo_exists():
-            self._create_projection_window(data)
-            return
-        for w in self.projection_win.winfo_children():
-            w.destroy()
-        self._build_projection_content(self.projection_win, data)
-        self.projection_win.after(50, lambda: (self.projection_win.lift(), self.projection_win.focus_force()))
-
     def _on_projection_close(self):
+        """No longer needed as a window, but kept for safety / cleanup."""
         try:
             if getattr(self, "_proj_canvas", None) is not None:
                 try:
@@ -2363,25 +2616,18 @@ class BudgetApp(ctk.CTk):
                 self._treemap_tip = None
                 self._treemap_tip_label = None
                 self._treemap_after_id = None
-            
         except Exception:
             pass
 
-        if self.projection_win is not None:
-            try:
-                self.projection_win.destroy()
-            except Exception:
-                pass
-        self.projection_win = None
         self.safe_end_date = None
         self._highlighted_category = None
 
     def _on_hide_paid_toggle(self):
         self.hide_paid = self.hide_paid_var.get()
-        if self.projection_win and self.projection_win.winfo_exists():
+        if self.projection_frame.winfo_children():
             data = self._generate_projection_data(silent=True)
             if data:
-                self._refresh_projection_window(data)
+                self._rebuild_projection(data)
 
     def _mark_past_paid(self):
         data = self._generate_projection_data(silent=True)
@@ -2393,26 +2639,49 @@ class BudgetApp(ctk.CTk):
             cur = conn.cursor()
             for t in data["full_tx"]:
                 if t["date"] < as_of and not t["is_paid"]:
-                    cur.execute("INSERT OR IGNORE INTO paid_transactions (date, description) VALUES (?,?)",
-                                (str(t["date"]), t["desc"]))
+                    cur.execute(
+                        "INSERT OR IGNORE INTO paid_transactions (date, description) VALUES (?,?)",
+                        (str(t["date"]), t["desc"])
+                    )
                     count += 1
             conn.commit()
-        self.status_label.configure(text=f"Marked {count} past items as paid", text_color="#9ece6a")
-        if self.projection_win and self.projection_win.winfo_exists():
-            self.update_projection()
+
+        self.status_label.configure(
+            text=f"Marked {count} past items as paid",
+            text_color="#9ece6a"
+        )
+
+        # Refresh the Projection tab if it has content
+        if self.projection_frame.winfo_children():
+            data = self._generate_projection_data(silent=True)
+            if data:
+                self._rebuild_projection(data)
+
         self.update_dashboard()
 
     def _clear_all_paid(self):
-        if not messagebox.askyesno("Clear all paid flags",
-                                   "This will remove every paid mark.\n\nContinue?"):
+        if not messagebox.askyesno(
+            "Clear all paid flags",
+            "This will remove every paid mark.\n\nContinue?"
+        ):
             return
+
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute("DELETE FROM paid_transactions")
             conn.commit()
-        self.status_label.configure(text="All paid flags cleared", text_color="#9ece6a")
-        if self.projection_win and self.projection_win.winfo_exists():
-            self.update_projection()
+
+        self.status_label.configure(
+            text="All paid flags cleared",
+            text_color="#9ece6a"
+        )
+
+        # Refresh the Projection tab if it has content
+        if self.projection_frame.winfo_children():
+            data = self._generate_projection_data(silent=True)
+            if data:
+                self._rebuild_projection(data)
+
         self.update_dashboard()
 
     def _highlight_category(self, category: str):
@@ -2541,13 +2810,23 @@ class BudgetApp(ctk.CTk):
         ax.axis("off")
         return patches, ordered_cats
 
-    def _build_projection_content(self, win, data):
-        menubar = Menu(win)
-        win.configure(menu=menubar)
-        actions = Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Actions", menu=actions)
-        actions.add_command(label="Mark all past as paid", command=self._mark_past_paid)
-        actions.add_command(label="Clear all paid flags", command=self._clear_all_paid)
+    def _build_projection_content(self, parent, data):
+        # Actions bar (replaces the old window menu)
+        actions_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        actions_frame.pack(fill="x", padx=14, pady=(8, 0))
+
+        ctk.CTkButton(
+            actions_frame, text="Mark all past as paid", width=160, height=30,
+            command=self._mark_past_paid,
+            font=ctk.CTkFont(family="Verdana", size=12)
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            actions_frame, text="Clear all paid flags", width=160, height=30,
+            command=self._clear_all_paid,
+            fg_color="#C62828", hover_color="#8E0000",
+            font=ctk.CTkFont(family="Verdana", size=12)
+        ).pack(side="left")
 
         tx = data["tx"]
         full_tx = data["full_tx"]
@@ -2567,7 +2846,7 @@ class BudgetApp(ctk.CTk):
         after_bills = data["after_bills"]
 
         # ========== HEADER ==========
-        sum_frame = ctk.CTkFrame(win, corner_radius=10)
+        sum_frame = ctk.CTkFrame(parent, corner_radius=10)
         sum_frame.pack(fill="x", padx=14, pady=(6, 4))
 
         sum_frame.grid_columnconfigure(0, minsize=210)
@@ -2642,7 +2921,7 @@ class BudgetApp(ctk.CTk):
                 self.safe_end_date = new_date
                 data = self._generate_projection_data(silent=True)
                 if data:
-                    self._refresh_projection_window(data)
+                    self._rebuild_projection(data)
                 self.update_dashboard()
             except Exception:
                 pass
@@ -2711,7 +2990,7 @@ class BudgetApp(ctk.CTk):
             ctk.CTkLabel(info, text=f"{bal_label}: ${bal_after:,.2f}",
                         font=ctk.CTkFont(family="Verdana", size=13)).pack(anchor="w")
         else:
-            ctk.CTkLabel(info, text="No Main income set (star a Fixed income)",
+            ctk.CTkLabel(info, text="No Main income set (click ★ on any income)",
                         text_color="#f7768e",
                         font=ctk.CTkFont(family="Verdana", size=13, weight="bold")).pack(anchor="w")
 
@@ -2753,7 +3032,7 @@ class BudgetApp(ctk.CTk):
                         WidgetTooltip(more_label, "Remaining expenses:\n" + "\n".join(tip_lines))
 
         # ========== MAIN CONTENT ==========
-        content = ctk.CTkFrame(win, fg_color="transparent")
+        content = ctk.CTkFrame(parent, fg_color="transparent")
         content.pack(fill="both", expand=True, padx=12, pady=(2, 0))
 
         table_frame = ctk.CTkFrame(content, corner_radius=10)
@@ -2858,7 +3137,7 @@ class BudgetApp(ctk.CTk):
                 conn.commit()
             new_data = self._generate_projection_data()
             if new_data:
-                self._refresh_projection_window(new_data)
+                self._rebuild_projection(new_data)
             self.update_dashboard()
 
         tree.bind("<Double-1>", toggle_paid)
@@ -2961,11 +3240,26 @@ class BudgetApp(ctk.CTk):
             self._treemap_canvas = treemap_canvas
             self._treemap_fig = fig
 
+            # Make legend items clickable
+            for handle, text, cat in zip(legend.legend_handles, legend.get_texts(), ordered_cats):
+                handle.set_picker(8)
+                text.set_picker(True)
+                handle._treemap_cat = cat
+                text._treemap_cat = cat
+
             def on_treemap_click(event):
-                if event.artist not in patches:
+                artist = event.artist
+                category = None
+
+                # Clicked a treemap block
+                if artist in patches:
+                    idx = patches.index(artist)
+                    category = ordered_cats[idx]
+                # Clicked a legend handle or label
+                elif hasattr(artist, "_treemap_cat"):
+                    category = artist._treemap_cat
+                else:
                     return
-                idx = patches.index(event.artist)
-                category = ordered_cats[idx]
 
                 if category == "Other":
                     self._clear_category_highlight()
@@ -3099,7 +3393,7 @@ class BudgetApp(ctk.CTk):
         # THIS MONTH panel
         this_month = ctk.CTkFrame(chart_frame, corner_radius=8,
                                   border_width=1, border_color=("#d0d0d0", "#555555"))
-        this_month.pack(fill="x", padx=8, pady=(8, 0))
+        this_month.pack(fill="x", padx=8, pady=(0, 0))
 
         ctk.CTkLabel(this_month, text="This Month",
                      font=ctk.CTkFont(family="Verdana", size=13, weight="bold")).pack(pady=(4, 2))
@@ -3144,7 +3438,7 @@ class BudgetApp(ctk.CTk):
         self._update_month_panel(month_labels[0])
 
         # ========== RUNNING BALANCE CHART ==========
-        chart_bottom = ctk.CTkFrame(win, corner_radius=10, height=115)
+        chart_bottom = ctk.CTkFrame(parent, corner_radius=10, height=115)
         chart_bottom.pack(fill="x", padx=14, pady=(0, 8))
         chart_bottom.pack_propagate(False)
 
@@ -3295,13 +3589,16 @@ if __name__ == "__main__":
             root.withdraw()
             messagebox.showerror(
                 "Budget already open",
-                f"The budget file “{last}” is already open in another window.\n\n"
+                "This budget file is already open in another window.\n\n"
                 "Please close the other instance first."
             )
             root.destroy()
             sys.exit(0)
 
         CURRENT_DB = last
+        CURRENT_DB_NAME = os.path.basename(last)
+        save_recent_budget(last)
+
         app = BudgetApp()
         app.mainloop()
     else:
